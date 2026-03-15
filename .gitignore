@@ -1,0 +1,55 @@
+# =========================
+# Backend data & generated artifacts
+# =========================
+agent_backend/data/
+agent_backend/test/results/
+agent_backend/script/knowledge_data/
+agent_backend/script/material_data/
+agent_backend/evaluate/evaluate_result/
+
+# =========================
+# Frontend build & deps
+# =========================
+agent_fronted/node_modules/
+agent_fronted/dist/
+agent_fronted/.cache/
+agent_fronted/.eslintcache
+
+# =========================
+# Python environments & cache
+# =========================
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# =========================
+# LLM secrets
+# =========================
+agent_backend/llm/temp/key/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+log/
+
+# =========================
+# IDE / OS
+# =========================
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+﻿[Reflector]
+你是反思校正器 Reflector。
+
+初稿结论:
+{% for f in findings_draft %}
+- {{ f }}
+{% endfor %}
+
+规则证据:
+{% for e in rule_evidence %}
+- {{ e }}
+{% endfor %}
+
+任务:
+1. 去重、去空泛、去矛盾。
+2. 保留高价值结论，补充缺失证据关联。
+3. 输出 refined 版本与说明 notes。
+
+只允许输出 JSON。

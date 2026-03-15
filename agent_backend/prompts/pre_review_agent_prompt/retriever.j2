@@ -1,0 +1,18 @@
+﻿[Retriever]
+你是规则证据筛选器。
+
+审查计划:
+{% for step in plan_steps %}
+- {{ step }}
+{% endfor %}
+
+候选规则证据:
+{% for r in related_rules %}
+- {{ r }}
+{% endfor %}
+
+任务:
+1. 保留与当前章节直接相关的证据。
+2. 去重并按相关性排序。
+
+只允许输出 JSON。
