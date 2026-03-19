@@ -1,7 +1,7 @@
-﻿<template>
+<template>
   <div class="frame">
-    <AppSidebar />
-    <div class="main">
+    <AppSidebar :collapsed="sidebarCollapsed" @toggle="toggleSidebar" />
+    <div class="main" :class="{ 'main--sidebar-collapsed': sidebarCollapsed }">
       <AppHeader />
       <section class="content">
         <router-view />
@@ -17,6 +17,20 @@ import AppSidebar from "@/components/layout/AppSidebar.vue";
 export default {
   name: "MainLayout",
   components: { AppHeader, AppSidebar },
+  data() {
+    return {
+      sidebarCollapsed: false,
+    };
+  },
+  mounted() {
+    this.sidebarCollapsed = window.localStorage.getItem("agent-sidebar-collapsed") === "1";
+  },
+  methods: {
+    toggleSidebar() {
+      this.sidebarCollapsed = !this.sidebarCollapsed;
+      window.localStorage.setItem("agent-sidebar-collapsed", this.sidebarCollapsed ? "1" : "0");
+    },
+  },
 };
 </script>
 
@@ -31,6 +45,7 @@ export default {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  transition: margin-left 0.2s ease;
 }
 
 .content {

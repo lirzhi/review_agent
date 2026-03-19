@@ -37,7 +37,7 @@ def ask():
     if top_k <= 0:
         return ResponseMessage(400, "top_k must be > 0", None).to_json(), 400
     try:
-        min_score = float(payload.get("min_score", 0.6))
+        min_score = float(payload.get("min_score", 0.0))
     except Exception:
         return ResponseMessage(400, "min_score must be number", None).to_json(), 400
 

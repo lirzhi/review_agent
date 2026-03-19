@@ -22,6 +22,10 @@ export function deleteKnowledge(docId) {
   return http.post(`/knowledge/${docId}/delete`, {});
 }
 
+export function batchDeleteKnowledge(docIds) {
+  return http.post("/knowledge/batch-delete", { doc_ids: Array.isArray(docIds) ? docIds : [] });
+}
+
 export function parseKnowledge(docId) {
   return http.post(`/knowledge/${docId}/parse`, {});
 }

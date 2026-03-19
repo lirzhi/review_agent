@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">预审项目管理</h2>
-        <div class="page-desc">创建项目、进入会话、查看历史版本与审计记录</div>
+        <div class="page-desc">创建预审项目，维护注册分类信息，进入项目会话后再按专业类别上传申报资料。</div>
       </div>
       <div>
         <el-button type="primary" @click="openCreateDialog">创建预审项目</el-button>
@@ -12,22 +12,21 @@
 
     <el-card class="k-card">
       <div slot="header">项目列表</div>
-      <el-table :data="projects" border class="k-table">
+      <el-table :data="projects" border class="k-table compact-table">
         <el-table-column prop="project_id" label="项目 ID" min-width="180" />
         <el-table-column prop="project_name" label="项目名称" min-width="180" />
-        <el-table-column prop="owner" label="负责人" width="120" />
+        <el-table-column prop="registration_scope" label="注册大类" width="100" />
+        <el-table-column prop="registration_leaf" label="注册分类" min-width="180" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="120" />
-        <el-table-column prop="progress" label="进度" width="150">
-          <template slot-scope="s">
-            <el-progress :percentage="Math.round((s.row.progress || 0) * 100)" :stroke-width="10" />
-          </template>
-        </el-table-column>
+        <el-table-column prop="version_count" label="版本数" width="80" />
+        <el-table-column prop="current_version" label="当前版本" width="90" />
+        <el-table-column prop="create_time" label="创建时间" width="165" />
         <el-table-column prop="update_time" label="更新时间" width="180" />
-        <el-table-column label="操作" width="300" fixed="right">
-          <template slot-scope="s">
-            <el-button type="text" @click="openSession(s.row)">进入会话</el-button>
-            <el-button type="text" @click="viewRuns(s.row)">运行记录</el-button>
-            <el-button type="text" style="color: #c62828" @click="dropProject(s.row)">删除</el-button>
+        <el-table-column label="操作" width="220">
+          <template slot-scope="scope">
+            <el-button type="text" @click="openSession(scope.row)">查看当前版本</el-button>
+            <el-button type="text" @click="viewRuns(scope.row)">查看历史版本</el-button>
+            <el-button type="text" style="color: #c62828" @click="dropProject(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -47,59 +46,105 @@
       </el-table>
     </el-card>
 
-    <el-dialog title="创建预审项目并上传申报资料" :visible.sync="createDialog.visible" width="640px">
-      <el-form label-width="90px" size="small">
+    <el-dialog title="创建预审项目" :visible.sync="createDialog.visible" width="760px">
+      <el-form label-width="110px" size="small">
         <el-form-item label="项目名称">
           <el-input v-model="projectForm.project_name" placeholder="请输入项目名称" />
         </el-form-item>
         <el-form-item label="负责人">
           <el-input v-model="projectForm.owner" placeholder="请输入负责人" />
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item label="项目描述">
           <el-input v-model="projectForm.description" type="textarea" :rows="3" placeholder="请输入项目描述" />
         </el-form-item>
-        <el-form-item label="申报资料">
-          <el-upload
-            action="#"
-            :auto-upload="false"
-            multiple
-            :file-list="createDialog.files"
-            :on-change="onSubmissionSelect"
-            :on-remove="onSubmissionRemove"
-            accept=".pdf,.doc,.docx,.txt,.md"
-          >
-            <el-button size="small">选择文件</el-button>
-          </el-upload>
-          <div class="upload-tip">支持多文件上传，创建项目后自动上传到该项目</div>
+        <el-form-item label="注册大类">
+          <el-select v-model="projectForm.registration_scope" placeholder="请选择注册大类" style="width: 100%" @change="onRegistrationScopeChange">
+            <el-option v-for="item in registrationScopeOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="注册分类路径">
+          <el-cascader
+            v-model="projectForm.registration_path"
+            :options="registrationOptions"
+            :props="registrationCascaderProps"
+            clearable
+            filterable
+            style="width: 100%"
+            placeholder="请选择注册分类"
+            @change="onRegistrationPathChange"
+          />
+        </el-form-item>
+        <el-form-item label="分类说明">
+          <div class="registration-panel" v-if="registrationDescriptions.length">
+            <div v-for="(item, index) in registrationDescriptions" :key="`${item.label}-${index}`" class="registration-item">
+              <div class="registration-title">{{ item.label }}</div>
+              <div class="registration-desc">{{ item.description }}</div>
+            </div>
+          </div>
+          <div v-else class="empty-tip">选择注册分类后，这里会展示各层级说明。</div>
         </el-form-item>
       </el-form>
       <span slot="footer">
         <el-button @click="closeCreateDialog">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="createWithSubmission">确认创建并上传</el-button>
+        <el-button type="primary" :loading="creating" @click="createProjectOnly">确认创建</el-button>
       </span>
     </el-dialog>
   </div>
 </template>
 
 <script>
-import { createProject, deleteProject, listProjects, runHistory, uploadSubmission } from "@/api/prereview";
+import { createProject, deleteProject, listProjects, runHistory } from "@/api/prereview";
+import { PRE_REVIEW_REGISTRATION_OPTIONS, findRegistrationNodes } from "@/constants/registration";
 
 export default {
   name: "PreReviewManage",
   data() {
     return {
-      projectForm: { project_name: "", owner: "", description: "" },
+      projectForm: this.getDefaultProjectForm(),
       projects: [],
       selectedProject: { project_id: "", project_name: "" },
       runs: [],
       creating: false,
-      createDialog: { visible: false, files: [] },
+      createDialog: { visible: false },
+      registrationCascaderProps: {
+        value: "value",
+        label: "label",
+        children: "children",
+        emitPath: true,
+        checkStrictly: false,
+      },
     };
+  },
+  computed: {
+    registrationScopeOptions() {
+      return PRE_REVIEW_REGISTRATION_OPTIONS.map((item) => item.value);
+    },
+    registrationOptions() {
+      if (!this.projectForm.registration_scope) {
+        return [];
+      }
+      return PRE_REVIEW_REGISTRATION_OPTIONS.filter((item) => item.value === this.projectForm.registration_scope);
+    },
+    registrationDescriptions() {
+      return findRegistrationNodes(this.projectForm.registration_path).map((item) => ({
+        label: item.label,
+        description: item.description || "",
+      }));
+    },
   },
   mounted() {
     this.loadProjects();
   },
   methods: {
+    getDefaultProjectForm() {
+      return {
+        project_name: "",
+        owner: "",
+        description: "",
+        registration_scope: "",
+        registration_path: [],
+      };
+    },
     async loadProjects() {
       try {
         const res = await listProjects({ page: 1, page_size: 100 });
@@ -113,56 +158,54 @@ export default {
     },
     closeCreateDialog() {
       this.createDialog.visible = false;
-      this.projectForm = { project_name: "", owner: "", description: "" };
-      this.createDialog.files = [];
+      this.projectForm = this.getDefaultProjectForm();
     },
-    onSubmissionSelect(file, fileList) {
-      this.createDialog.files = fileList;
+    onRegistrationScopeChange() {
+      this.projectForm.registration_path = this.projectForm.registration_scope ? [this.projectForm.registration_scope] : [];
     },
-    onSubmissionRemove(file, fileList) {
-      this.createDialog.files = fileList;
+    onRegistrationPathChange(path) {
+      if (!Array.isArray(path) || !path.length) {
+        this.projectForm.registration_path = [];
+        return;
+      }
+      this.projectForm.registration_scope = path[0] || "";
     },
-    async createWithSubmission() {
+    async createProjectOnly() {
       if (!this.projectForm.project_name) {
         this.$message.warning("请输入项目名称");
         return;
       }
-      if (!this.createDialog.files.length) {
-        this.$message.warning("请至少上传一个申报资料文件");
+      if (!this.projectForm.registration_scope) {
+        this.$message.warning("请选择注册大类");
+        return;
+      }
+      if (!this.projectForm.registration_path.length) {
+        this.$message.warning("请选择注册分类路径");
         return;
       }
       this.creating = true;
       try {
-        const res = await createProject(this.projectForm);
+        const nodes = findRegistrationNodes(this.projectForm.registration_path);
+        const registrationLeaf = nodes.length ? nodes[nodes.length - 1].value : "";
+        const registrationDescription = nodes
+          .map((item) => `${item.label}：${item.description || ""}`)
+          .join("\n\n");
+        const payload = {
+          project_name: this.projectForm.project_name,
+          owner: this.projectForm.owner,
+          description: this.projectForm.description,
+          registration_scope: this.projectForm.registration_scope,
+          registration_path: this.projectForm.registration_path,
+          registration_leaf: registrationLeaf,
+          registration_description: registrationDescription,
+        };
+        const res = await createProject(payload);
         const data = (res && res.data) || {};
         const projectId = data.project_id;
         if (!projectId) {
           throw new Error("项目创建成功但未返回 project_id");
         }
-
-        let successCount = 0;
-        let failCount = 0;
-        for (const item of this.createDialog.files) {
-          const raw = item && item.raw;
-          if (!raw) continue;
-          const fd = new FormData();
-          fd.append("file", raw);
-          try {
-            await uploadSubmission(projectId, fd);
-            successCount += 1;
-          } catch (_) {
-            failCount += 1;
-          }
-        }
-
-        if (successCount > 0 && failCount === 0) {
-          this.$message.success("项目创建并上传成功");
-        } else if (successCount > 0 && failCount > 0) {
-          this.$message.warning(`项目已创建，资料部分上传成功：成功 ${successCount}，失败 ${failCount}`);
-        } else {
-          this.$message.warning("项目已创建，但申报资料上传失败");
-        }
-
+        this.$message.success((res && res.message) || "项目创建成功");
         this.closeCreateDialog();
         await this.loadProjects();
         this.$router.push({ name: "pre-review-session", params: { projectId } });
@@ -201,9 +244,34 @@ export default {
 </script>
 
 <style scoped>
-.upload-tip {
-  color: #909399;
-  font-size: 12px;
+.registration-panel {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.registration-item + .registration-item {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #d1d5db;
+}
+
+.registration-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.registration-desc,
+.empty-tip {
   margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4b5563;
+}
+
+.compact-table ::v-deep .cell {
+  word-break: break-word;
 }
 </style>

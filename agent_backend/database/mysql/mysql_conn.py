@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import URL, make_url
@@ -80,6 +81,16 @@ def _create_mysql_database_if_needed(database_url: str) -> None:
         engine.dispose()
 
 
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    url = make_url(database_url)
+    if not url.drivername.startswith("sqlite"):
+        return
+    db_path = str(url.database or "").strip()
+    if not db_path or db_path == ":memory:":
+        return
+    Path(db_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+
 @singleton
 class MysqlConnection:
     def __init__(self):
@@ -88,6 +99,7 @@ class MysqlConnection:
         # SQLite does not support pool_size/max_overflow.
         if self.database_url.startswith("sqlite"):
             engine_options = {}
+            _ensure_sqlite_parent_dir(self.database_url)
 
         self.engine = create_engine(
             self.database_url,
@@ -133,4 +145,3 @@ class MysqlConnection:
                 column_comment = "No comment"
             table_structure[column_name] = column_comment
         return table_structure
-

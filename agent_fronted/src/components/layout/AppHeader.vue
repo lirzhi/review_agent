@@ -1,7 +1,7 @@
-﻿<template>
+<template>
   <header class="app-header">
     <div class="left">
-      <h1 class="title">药审智能预审平台</h1>
+      <h1 class="title">药品智能预审系统</h1>
       <p class="desc">知识库管理 · 申报资料解析 · 按章节预审</p>
     </div>
     <div class="right">

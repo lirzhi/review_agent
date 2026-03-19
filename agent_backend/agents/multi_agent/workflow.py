@@ -23,6 +23,8 @@ class WorkflowState(TypedDict, total=False):
     doc_id: str
     section_id: str
     content: str
+    section_meta: Dict[str, Any]
+    retrieval_context: Dict[str, Any]
     memory_context: str
     memory_package: Dict[str, Any]
     related_rules: List[Dict[str, Any]]
@@ -30,9 +32,11 @@ class WorkflowState(TypedDict, total=False):
     plan_steps: List[str]
     rule_evidence: List[str]
     shared_context: Dict[str, Any]
-    findings_draft: List[str]
-    findings_refined: List[str]
-    findings: List[str]
+    run_config: Dict[str, Any]
+    prompt_config: Dict[str, Any]
+    findings_draft: List[Dict[str, Any]]
+    findings_refined: List[Dict[str, Any]]
+    findings: List[Dict[str, Any]]
     score: float
     conclusion: str
     trace: Dict[str, Any]
@@ -40,11 +44,11 @@ class WorkflowState(TypedDict, total=False):
 
 class MultiAgentPreReviewWorkflow:
     RISK_KEYWORDS: Dict[str, List[str]] = {
-        "contraindication": ["contraindication", "禁忌"],
-        "adverse_reaction": ["adverse reaction", "不良反应"],
-        "dosage": ["dosage", "dose", "用法用量", "剂量"],
-        "warning": ["warning", "precaution", "注意事项", "警告"],
-        "interaction": ["drug interaction", "相互作用"],
+        "contraindication": ["contraindication", "禁忌", "慎用", "不适用", "不得使用"],
+        "adverse_reaction": ["adverse reaction", "不良反应", "安全性", "风险", "毒性"],
+        "dosage": ["dosage", "dose", "剂量", "用法", "给药", "频次"],
+        "warning": ["warning", "precaution", "注意事项", "警示", "风险控制"],
+        "interaction": ["drug interaction", "相互作用", "联用", "配伍"],
     }
 
     def __init__(self, memory_tool: MemoryTool | None = None, roles: List[AgentRole] | None = None):
@@ -96,11 +100,55 @@ class MultiAgentPreReviewWorkflow:
             }
         )
 
-    def _safe_prompt(self, template_name: str, context: Dict[str, Any]) -> str:
+    def _safe_prompt(self, template_name: str, context: Dict[str, Any], state: WorkflowState) -> str:
         try:
-            return self.prompts.render(template_name, context)
+            return self.prompts.render(template_name, context, prompt_config=state.get("prompt_config", {}) or {})
         except Exception as e:
             return f"[prompt_render_error] {template_name}: {str(e)}"
+
+    @staticmethod
+    def _normalize_finding(item: Any) -> Dict[str, Any]:
+        if isinstance(item, dict):
+            title = str(item.get("title", "") or "").strip()
+            return {
+                "title": title,
+                "problem_type": str(item.get("problem_type", "") or "").strip(),
+                "severity": str(item.get("severity", "low") or "low").strip().lower(),
+                "evidence": str(item.get("evidence", "") or "").strip(),
+                "recommendation": str(item.get("recommendation", "") or "").strip(),
+                "metadata": item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {},
+            }
+        title = str(item or "").strip()
+        return {
+            "title": title,
+            "problem_type": "",
+            "severity": "low",
+            "evidence": "",
+            "recommendation": "",
+            "metadata": {},
+        }
+
+    def _normalize_findings(self, items: List[Any]) -> List[Dict[str, Any]]:
+        seen = set()
+        normalized: List[Dict[str, Any]] = []
+        for item in items or []:
+            finding = self._normalize_finding(item)
+            title = finding.get("title", "").strip()
+            if not title:
+                continue
+            key = (
+                title,
+                finding.get("problem_type", ""),
+                finding.get("severity", "low"),
+                finding.get("evidence", ""),
+                finding.get("recommendation", ""),
+                json.dumps(finding.get("metadata", {}), ensure_ascii=False, sort_keys=True),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(finding)
+        return normalized
 
     def _llm_json(self, messages: List[Dict[str, str]], default: Dict[str, Any]) -> Dict[str, Any]:
         fallback = json.dumps(default, ensure_ascii=False)
@@ -129,13 +177,20 @@ class MultiAgentPreReviewWorkflow:
 
     def _build_shared_context(self, state: WorkflowState) -> Dict[str, Any]:
         mem_pkg = state.get("memory_package", {}) or {}
+        retrieval_context = state.get("retrieval_context", {}) or {}
+        retrieval_hits = retrieval_context.get("hits", []) if isinstance(retrieval_context, dict) else []
+        grouped_docs = retrieval_context.get("grouped_docs", []) if isinstance(retrieval_context, dict) else []
         return {
             "section_id": state.get("section_id", ""),
+            "section_meta": state.get("section_meta", {}) or {},
             "plan_steps": state.get("plan_steps", []),
             "memory_context": state.get("memory_context", "")[:1200],
             "memory_highlights": (mem_pkg.get("hits_by_type", {}) if isinstance(mem_pkg, dict) else {}),
             "rule_evidence": state.get("rule_evidence", []),
+            "retrieval_hit_count": len(retrieval_hits),
+            "retrieval_grouped_docs": grouped_docs[:3],
             "coordination_payload": state.get("coordination_payload", {}) or {},
+            "prompt_config": state.get("prompt_config", {}) or {},
         }
 
     def _plan_node(self, state: WorkflowState) -> WorkflowState:
@@ -144,24 +199,27 @@ class MultiAgentPreReviewWorkflow:
             "planner.j2",
             {
                 "section_id": state.get("section_id", ""),
+                "section_meta": state.get("section_meta", {}),
                 "content": text,
                 "memory_context": state.get("memory_context", "")[:1200],
             },
+            state,
         )
         default_steps: List[str] = [
-            "识别本章节核心主题与监管风险点",
-            "定位可疑表述并标记证据句",
-            "与规则证据逐项比对",
-            "输出可执行的审评结论",
+            "确认本章节的审评目标、资料边界和章节类型",
+            "抽取关键风险点、关键参数、缺失项和上下文依赖",
+            "结合检索证据和历史反馈列出核查步骤",
+            "输出带证据的问题清单、结论和风险等级",
         ]
         resp = self._llm_json(
             messages=[
-                {"role": "system", "content": "你是药审预审Planner，只输出JSON。"},
+                {"role": "system", "content": "你是预审规划代理。只输出合法 JSON。"},
                 {
                     "role": "user",
                     "content": (
                         f"{prompt}\n\n"
-                        "请输出JSON对象: {\"plan_steps\": [\"...\"], \"risk_focus\": [\"...\"]}"
+                        "输出 JSON 结构: "
+                        '{"plan_steps": ["..."], "risk_focus": ["..."], "section_type": "...", "notes": "..."}'
                     ),
                 },
             ],
@@ -177,18 +235,14 @@ class MultiAgentPreReviewWorkflow:
         prompt = self._safe_prompt(
             "retriever.j2",
             {"plan_steps": state.get("plan_steps", []), "related_rules": evidence},
+            state,
         )
-
         resp = self._llm_json(
             messages=[
-                {"role": "system", "content": "你是规则证据筛选器，只输出JSON。"},
+                {"role": "system", "content": "你是证据筛选代理。只输出合法 JSON。"},
                 {
                     "role": "user",
-                    "content": (
-                        f"{prompt}\n\n"
-                        "请输出JSON对象: {\"rule_evidence\": [\"...\"]}，"
-                        "仅保留与当前章节直接相关的证据。"
-                    ),
+                    "content": f"{prompt}\n\n输出 JSON 结构: {{\"rule_evidence\": [\"...\"]}}",
                 },
             ],
             default={"rule_evidence": evidence[:8]},
@@ -202,11 +256,14 @@ class MultiAgentPreReviewWorkflow:
         shared = self._build_shared_context(state)
         state["shared_context"] = shared
         preview = {
+            "section_meta": shared.get("section_meta", {}),
             "plan_steps": shared.get("plan_steps", [])[:4],
             "rule_evidence_count": len(shared.get("rule_evidence", [])),
+            "retrieval_hit_count": shared.get("retrieval_hit_count", 0),
             "memory_types": list((shared.get("memory_highlights", {}) or {}).keys()),
             "memory_context_preview": str(shared.get("memory_context", ""))[:300],
             "coordination_keys": list((shared.get("coordination_payload", {}) or {}).keys()),
+            "prompt_version_id": str((shared.get("prompt_config", {}) or {}).get("prompt_version_id", "") or ""),
         }
         self._append_trace(state, "context_builder", {"shared_context_preview": preview})
         return state
@@ -216,37 +273,67 @@ class MultiAgentPreReviewWorkflow:
         shared = state.get("shared_context", {}) or {}
         mem = str(shared.get("memory_context", state.get("memory_context", "")))[:1500]
         rule_evidence = shared.get("rule_evidence", state.get("rule_evidence", []))
+        retrieval_grouped_docs = shared.get("retrieval_grouped_docs", [])
         prompt = self._safe_prompt(
             "reviewer.j2",
-            {"content": text, "memory_context": mem, "rule_evidence": rule_evidence},
+            {
+                "content": text,
+                "memory_context": mem,
+                "rule_evidence": rule_evidence,
+                "retrieval_grouped_docs": retrieval_grouped_docs,
+                "section_meta": shared.get("section_meta", {}),
+            },
+            state,
         )
-
         resp = self._llm_json(
             messages=[
-                {"role": "system", "content": "你是药审Reviewer，只输出JSON。"},
+                {"role": "system", "content": "你是章节审评代理。只输出合法 JSON。"},
                 {
                     "role": "user",
                     "content": (
                         f"{prompt}\n\n"
-                        "请输出JSON对象: {\"findings_draft\": [\"...\"]}。"
-                        "每条结论要具体、可定位、可核查。"
+                        "输出 JSON 结构: "
+                        '{"findings_draft": [{"title": "...", "problem_type": "...", "severity": "high|medium|low", '
+                        '"evidence": "...", "recommendation": "..."}], "conclusion": "...", "score": 0}'
                     ),
                 },
             ],
             default={"findings_draft": []},
         )
 
-        findings = self._uniq([str(x) for x in resp.get("findings_draft", [])])
-
+        findings = self._normalize_findings(resp.get("findings_draft", []))
         if not findings:
             if self._contains_any(text, self.RISK_KEYWORDS["contraindication"]):
-                findings.append("疑似缺少禁忌/适用限制的完整说明")
+                findings.append(self._normalize_finding({
+                    "title": "发现禁忌或限制性用药信息，需要重点核查适应证和风险控制表述",
+                    "problem_type": "禁忌与限制性信息核查",
+                    "severity": "high",
+                }))
             if self._contains_any(text, self.RISK_KEYWORDS["adverse_reaction"]):
-                findings.append("不良反应描述可能不完整，建议补充分级与发生率")
+                findings.append(self._normalize_finding({
+                    "title": "不良反应或安全性描述可能不完整，需要补充证据和风险说明",
+                    "problem_type": "安全性信息不足",
+                    "severity": "medium",
+                    "recommendation": "补充安全性依据，核对说明书、不良反应监测和风险控制内容",
+                }))
             if self._contains_any(text, self.RISK_KEYWORDS["dosage"]):
-                findings.append("剂量或给药方案存在歧义，建议明确单位与调整条件")
-        state["findings_draft"] = self._uniq(findings)
-        self._append_trace(state, "reviewer", {"findings_draft": state["findings_draft"], "prompt": prompt, "llm": resp})
+                findings.append(self._normalize_finding({
+                    "title": "用法用量或给药方案信息可能不一致，需要核对关键参数",
+                    "problem_type": "给药方案不一致",
+                    "severity": "medium",
+                    "recommendation": "核对剂量、给药频次、人群差异和关键试验依据",
+                }))
+        state["findings_draft"] = self._normalize_findings(findings)
+        self._append_trace(
+            state,
+            "reviewer",
+            {
+                "findings_draft": state["findings_draft"],
+                "retrieval_hit_count": shared.get("retrieval_hit_count", 0),
+                "prompt": prompt,
+                "llm": resp,
+            },
+        )
         return state
 
     def _reflect_node(self, state: WorkflowState) -> WorkflowState:
@@ -257,53 +344,51 @@ class MultiAgentPreReviewWorkflow:
                 "rule_evidence": state.get("rule_evidence", []),
                 "plan_steps": state.get("plan_steps", []),
             },
+            state,
         )
         resp = self._llm_json(
             messages=[
-                {"role": "system", "content": "你是反思校正器Reflector，只输出JSON。"},
+                {"role": "system", "content": "你是审评反思代理。只输出合法 JSON。"},
                 {
                     "role": "user",
                     "content": (
                         f"{prompt}\n\n"
-                        "请输出JSON对象: {\"findings_refined\": [\"...\"], \"notes\": [\"...\"]}。"
-                        "去重、去模糊、补充证据关联。"
+                        "输出 JSON 结构: "
+                        '{"findings_refined": [{"title": "...", "problem_type": "...", "severity": "high|medium|low", '
+                        '"evidence": "...", "recommendation": "..."}], "notes": ["..."]}'
                     ),
                 },
             ],
             default={"findings_refined": state.get("findings_draft", []), "notes": []},
         )
-        refined = self._uniq([str(x) for x in resp.get("findings_refined", [])])
+        refined = self._normalize_findings(resp.get("findings_refined", []))
         if not refined:
-            refined = self._uniq(state.get("findings_draft", []))
+            refined = self._normalize_findings(state.get("findings_draft", []))
         state["findings_refined"] = refined
         self._append_trace(state, "reflector", {"findings_refined": refined, "prompt": prompt, "llm": resp})
         return state
 
     def _solve_node(self, state: WorkflowState) -> WorkflowState:
-        findings = self._uniq(state.get("findings_refined", []))
+        findings = self._normalize_findings(state.get("findings_refined", []))
         evidence_count = len(state.get("rule_evidence", []))
         base_score = min(len(findings) / 8.0, 1.0)
         evidence_bonus = min(evidence_count * 0.03, 0.15)
         score = min(base_score + evidence_bonus, 1.0)
 
-        prompt = self._safe_prompt("synthesizer.j2", {"findings": findings, "score": score})
+        prompt = self._safe_prompt("synthesizer.j2", {"findings": findings, "score": score}, state)
+        default_conclusion = "；".join([item.get("title", "") for item in findings]) if findings else "当前章节未发现明确缺陷，但仍需结合全卷和上下文进一步核对"
         resp = self._llm_json(
             messages=[
-                {"role": "system", "content": "你是结论综合器Synthesizer，只输出JSON。"},
+                {"role": "system", "content": "你是结论综合代理。只输出合法 JSON。"},
                 {
                     "role": "user",
-                    "content": (
-                        f"{prompt}\n\n"
-                        "请输出JSON对象: {\"conclusion\": \"...\", \"score\": 0~1}。"
-                    ),
+                    "content": f"{prompt}\n\n输出 JSON 结构: {{\"conclusion\": \"...\", \"score\": 0~1}}",
                 },
             ],
-            default={"conclusion": "; ".join(findings) if findings else "No obvious issue found", "score": score},
+            default={"conclusion": default_conclusion, "score": score},
         )
 
-        final_conclusion = str(resp.get("conclusion", "")).strip() or (
-            "; ".join(findings) if findings else "No obvious issue found"
-        )
+        final_conclusion = str(resp.get("conclusion", "")).strip() or default_conclusion
         try:
             score = float(resp.get("score", score))
         except Exception:
@@ -320,12 +405,13 @@ class MultiAgentPreReviewWorkflow:
             {"findings": findings, "score": score, "conclusion": final_conclusion, "prompt": prompt, "llm": resp},
         )
         trace = state.setdefault("trace", {})
-        trace["workflow_version"] = "v4_collab_context"
+        trace["workflow_version"] = str((state.get("prompt_config", {}) or {}).get("prompt_version_id", "v5_prompt_bundle"))
         trace["summary"] = {
             "plan_steps": state.get("plan_steps", []),
             "rule_evidence_count": len(state.get("rule_evidence", [])),
             "findings_count": len(findings),
             "score": score,
+            "prompt_bundle_path": str((state.get("prompt_config", {}) or {}).get("prompt_bundle_path", "") or ""),
         }
         return state
 

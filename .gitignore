@@ -2,9 +2,7 @@
 # Backend data & generated artifacts
 # =========================
 agent_backend/data/
-agent_backend/test/results/
-agent_backend/script/knowledge_data/
-agent_backend/script/material_data/
+agent_backend/test
 agent_backend/evaluate/evaluate_result/
 
 # =========================

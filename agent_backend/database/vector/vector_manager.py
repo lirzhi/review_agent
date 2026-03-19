@@ -13,9 +13,12 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 class VectorManager:
+    _shared_store: Dict[str, Dict] = {}
+    _shared_lock = RLock()
+
     def __init__(self):
-        self._store: Dict[str, Dict] = {}
-        self._lock = RLock()
+        self._store = VectorManager._shared_store
+        self._lock = VectorManager._shared_lock
 
     def upsert(self, vec_id: str, vector: List[float], text: str, metadata: Dict | None = None) -> None:
         with self._lock:

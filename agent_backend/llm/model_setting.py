@@ -17,7 +17,7 @@ def _resolve_key_path(path_str: str) -> str:
 
 MODEL_CONFIG: Dict[str, Any] = {
     "active": {
-        "chat": os.getenv("LLM_CHAT_MODEL", "glm_chat"),
+        "chat": os.getenv("LLM_CHAT_MODEL", "qwen_chat"),
         "parse": os.getenv("LLM_PARSE_MODEL", "glm_ocr_parse"),
         "embedding": os.getenv("LLM_EMBEDDING_MODEL", "glm_embedding"),
         "rerank": os.getenv("LLM_RERANK_MODEL", "glm_rerank"),
@@ -49,10 +49,17 @@ MODEL_CONFIG: Dict[str, Any] = {
         },
         "qwen_chat": {
             "kind": "openai_chat",
-            "model": "qwen-turbo",
+            "model": "qwen3.5-plus",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "api_key_path": _resolve_key_path("temp/key/qwen_key"),
             "timeout": int(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+        },
+        "qwen_local_chat": {
+            "kind": "qwen_local_chat",
+            "model": os.getenv("LLM_QWEN_LOCAL_CHAT_MODEL", "qwen3.5:27b"),
+            "base_url": os.getenv("LLM_QWEN_LOCAL_CHAT_BASE_URL", "http://localhost:11434/v1"),
+            "api_key_path": _resolve_key_path(os.getenv("LLM_QWEN_LOCAL_CHAT_API_KEY_PATH", "temp/key/local_key")),
+            "timeout": int(os.getenv("LLM_QWEN_LOCAL_CHAT_TIMEOUT_SECONDS", os.getenv("LLM_TIMEOUT_SECONDS", "30"))),
         },
         "qwen_parse": {
             "kind": "openai_chat",

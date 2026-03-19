@@ -1,32 +1,48 @@
-﻿<template>
-  <aside class="side">
+<template>
+  <aside class="side" :class="{ 'side--collapsed': collapsed }">
     <div class="logo-wrap">
-      <div class="logo">A</div>
-      <div>
-        <div class="name">Agent Review</div>
-        <div class="sub">{{ uiText.systemName }}</div>
+      <div class="logo">药</div>
+      <div v-if="!collapsed" class="brand-copy">
+        <div class="name">药品智能预审系统</div>
+        <div class="sub">智能审评工作台</div>
       </div>
+      <el-button
+        class="collapse-btn"
+        type="text"
+        :icon="collapsed ? 'el-icon-s-unfold' : 'el-icon-s-fold'"
+        @click="$emit('toggle')"
+      />
     </div>
-    <el-menu :default-active="$route.path" :default-openeds="['knowledge-group']" router class="menu">
+
+    <el-menu
+      :default-active="$route.path"
+      :default-openeds="[]"
+      :unique-opened="true"
+      router
+      class="menu"
+    >
       <el-menu-item index="/dashboard">
         <i class="el-icon-data-analysis"></i>
-        <span>{{ uiText.dashboard }}</span>
+        <span>概览</span>
       </el-menu-item>
 
       <el-submenu index="knowledge-group">
         <template slot="title">
           <i class="el-icon-collection"></i>
-          <span>{{ uiText.knowledge }}</span>
+          <span>知识库</span>
         </template>
         <el-menu-item v-for="item in knowledgeMenus" :key="item.path" :index="item.path">
           {{ item.label }}
         </el-menu-item>
       </el-submenu>
 
-      <el-menu-item index="/pre-review">
-        <i class="el-icon-document-checked"></i>
-        <span>{{ uiText.preReview }}</span>
-      </el-menu-item>
+      <el-submenu index="review-group">
+        <template slot="title">
+          <i class="el-icon-document-checked"></i>
+          <span>预审任务</span>
+        </template>
+        <el-menu-item index="/pre-review">项目管理</el-menu-item>
+      </el-submenu>
     </el-menu>
   </aside>
 </template>
@@ -34,22 +50,23 @@
 <script>
 export default {
   name: "AppSidebar",
+  props: {
+    collapsed: {
+      type: Boolean,
+      default: false,
+    },
+  },
   data() {
     return {
-      uiText: {
-        systemName: "药审预审系统",
-        dashboard: "仪表盘",
-        knowledge: "知识库",
-        preReview: "预审项目",
-      },
       knowledgeMenus: [
         { path: "/knowledge/guideline", label: "指导原则" },
         { path: "/knowledge/policy", label: "制度规范" },
         { path: "/knowledge/law", label: "法律法规" },
+        { path: "/knowledge/ich", label: "ICH" },
         { path: "/knowledge/pharmacopeia", label: "药典数据" },
-        { path: "/knowledge/experience", label: "历史经验" },
         { path: "/knowledge/common-issue", label: "共性问题" },
-        { path: "/knowledge/review-rule", label: "审评规则" },
+        { path: "/knowledge/review-rule", label: "审评准则" },
+        { path: "/knowledge/experience", label: "历史经验" },
       ],
     };
   },
@@ -58,27 +75,37 @@ export default {
 
 <style scoped>
 .side {
-  width: 240px;
+  width: 208px;
   height: 100%;
   background: linear-gradient(180deg, #f8fbff 0%, #eef3fa 100%);
   color: #2f3b4a;
   display: flex;
   flex-direction: column;
   border-right: 1px solid #dbe5f0;
+  transition: width 0.2s ease;
+}
+
+.side--collapsed {
+  width: 68px;
 }
 
 .logo-wrap {
-  height: 68px;
+  height: 64px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px;
+  padding: 0 14px;
   border-bottom: 1px solid #e3ebf5;
 }
 
+.side--collapsed .logo-wrap {
+  padding: 0 10px;
+  justify-content: center;
+}
+
 .logo {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 10px;
   background: linear-gradient(135deg, #4fc3f7, #1565c0);
   color: #fff;
@@ -88,15 +115,31 @@ export default {
   font-weight: 800;
 }
 
+.brand-copy {
+  min-width: 0;
+}
+
+.collapse-btn {
+  margin-left: auto;
+  color: #5f6f81;
+}
+
+.side--collapsed .collapse-btn {
+  margin-left: 0;
+}
+
 .name {
-  font-size: 14px;
+  font-size: 13px;
   color: #1f2d3d;
   font-weight: 700;
+  line-height: 1.2;
 }
 
 .sub {
-  font-size: 12px;
+  font-size: 11px;
   color: #5f6f81;
+  line-height: 1.2;
+  margin-top: 2px;
 }
 
 .menu {
@@ -105,11 +148,29 @@ export default {
   padding: 10px 8px;
 }
 
+.side--collapsed .menu {
+  padding: 10px 6px;
+}
+
+.side--collapsed ::v-deep .el-menu-item span,
+.side--collapsed ::v-deep .el-submenu__title span,
+.side--collapsed ::v-deep .el-submenu__icon-arrow {
+  display: none;
+}
+
+.side--collapsed ::v-deep .el-menu-item,
+.side--collapsed ::v-deep .el-submenu__title {
+  padding: 0 !important;
+  text-align: center;
+}
+
 .menu .el-menu-item,
-.menu /deep/ .el-submenu__title {
+.menu ::v-deep .el-submenu__title {
   color: #2f3b4a;
   border-radius: 8px;
   margin-bottom: 4px;
+  height: 42px;
+  line-height: 42px;
 }
 
 .menu .el-menu-item.is-active {
@@ -119,11 +180,11 @@ export default {
 }
 
 .menu .el-menu-item:hover,
-.menu /deep/ .el-submenu__title:hover {
+.menu ::v-deep .el-submenu__title:hover {
   background: #eaf3ff;
 }
 
-.menu /deep/ .el-submenu .el-menu-item {
+.menu ::v-deep .el-submenu .el-menu-item {
   min-width: 0;
 }
 </style>

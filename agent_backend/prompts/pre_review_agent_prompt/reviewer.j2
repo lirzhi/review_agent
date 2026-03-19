@@ -1,10 +1,13 @@
 ﻿[Reviewer]
-你是药审 Reviewer。
+你负责形成章节级审评问题初稿。
 
-章节内容:
+章节元数据:
+{{ section_meta }}
+
+章节正文:
 {{ content }}
 
-记忆上下文:
+历史记忆:
 {{ memory_context }}
 
 规则证据:
@@ -12,8 +15,13 @@
 - {{ e }}
 {% endfor %}
 
-任务:
-1. 产出可核查的问题发现（findings_draft）。
-2. 每条结论尽量包含问题类型、证据线索、整改建议方向。
+检索文档摘要:
+{{ retrieval_grouped_docs }}
 
-只允许输出 JSON。
+任务要求:
+1. findings_draft 中每条问题必须包含 title、problem_type、severity、evidence、recommendation。
+2. evidence 必须优先引用当前章节原文和规则证据，不允许凭空臆断。
+3. 如果证据不足但风险明显，可以输出“需补充资料/需进一步核查”类问题。
+4. 只保留高价值问题，避免重复表达同一问题。
+5. score 取 0~1，值越高表示风险越高。
+6. 只输出 JSON。

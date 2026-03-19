@@ -48,11 +48,23 @@ def _resolve_mysql_url(url: str) -> str:
     return f"sqlite:///{(ROOT / p).as_posix()}"
 
 
+def _resolve_vector_uri(uri: str, default_path: Path) -> str:
+    value = (uri or "").strip()
+    if not value:
+        return "http://127.0.0.1:19530"
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return _resolve_data_path(value, default_path)
+
+
 @dataclass
 class Settings:
     app_host: str = os.getenv("APP_HOST", "0.0.0.0")
     app_port: int = int(os.getenv("APP_PORT", "5001"))
     debug: bool = os.getenv("DEBUG", "true").lower() == "true"
+    auto_start_llm: bool = os.getenv("AUTO_START_LLM", "true").lower() == "true"
+    llm_host: str = os.getenv("LLM_HOST", "127.0.0.1")
+    llm_port: int = int(os.getenv("LLM_PORT", "8024"))
 
     upload_dir: str = _resolve_data_path(
         os.getenv("UPLOAD_DIR", ""),
@@ -74,6 +86,18 @@ class Settings:
         os.getenv("REPORT_DIR", ""),
         ROOT / "data" / "reports",
     )
+    feedback_asset_dir: str = _resolve_data_path(
+        os.getenv("FEEDBACK_ASSET_DIR", ""),
+        ROOT / "data" / "feedback_assets",
+    )
+    rule_data_dir: str = _resolve_data_path(
+        os.getenv("RULE_DATA_DIR", ""),
+        ROOT / "data" / "rule",
+    )
+    vector_snapshot_dir: str = _resolve_data_path(
+        os.getenv("VECTOR_SNAPSHOT_DIR", ""),
+        ROOT / "data" / "vector_snapshots",
+    )
 
     mysql_url: str = _resolve_mysql_url(
         os.getenv("MYSQL_URL", f"sqlite:///{(ROOT / 'data' / 'agent.db').as_posix()}")
@@ -84,6 +108,39 @@ class Settings:
 
     es_url: str = os.getenv("ES_URL", "http://127.0.0.1:9200")
     vector_collection: str = os.getenv("VECTOR_COLLECTION", "agent_collection")
+    vector_backend: str = os.getenv("VECTOR_BACKEND", "milvus")
+    vector_db_uri: str = _resolve_vector_uri(
+        os.getenv("MILVUS_URI", ""),
+        ROOT / "data" / "milvus" / "agent_milvus.db",
+    )
+    milvus_token: str = os.getenv("MILVUS_TOKEN", "")
+    milvus_db_name: str = os.getenv("MILVUS_DB_NAME", "")
+    kb_chunk_max_chars: int = int(os.getenv("KB_CHUNK_MAX_CHARS", "1200"))
+    kb_chunk_overlap: int = int(os.getenv("KB_CHUNK_OVERLAP", "120"))
+    kb_section_path_sep: str = os.getenv("KB_SECTION_PATH_SEP", " > ")
+    kb_parse_workers: int = int(os.getenv("KB_PARSE_WORKERS", "2"))
+    kb_progress_max_entries: int = int(os.getenv("KB_PROGRESS_MAX_ENTRIES", "2000"))
+    kb_progress_ttl_seconds: int = int(os.getenv("KB_PROGRESS_TTL_SECONDS", "7200"))
+
+    ocr_service_url: str = os.getenv("OCR_SERVICE_URL", "http://127.0.0.1:8000")
+    ocr_timeout_seconds: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "120"))
+    ocr_lang: str = os.getenv("OCR_LANG", "chi_sim+eng")
+
+    llm_chat_model: str = os.getenv("LLM_CHAT_MODEL", "qwen_chat")
+    llm_parse_model: str = os.getenv("LLM_PARSE_MODEL", "glm_ocr_parse")
+    llm_embedding_model: str = os.getenv("LLM_EMBEDDING_MODEL", "glm_embedding")
+    llm_rerank_model: str = os.getenv("LLM_RERANK_MODEL", "glm_rerank")
+    llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+    llm_parse_timeout_seconds: int = int(os.getenv("LLM_PARSE_TIMEOUT_SECONDS", "60"))
+    llm_verbose_log: bool = os.getenv("LLM_VERBOSE_LOG", "0").lower() in {"1", "true", "yes", "on"}
+    llm_chat_context_max_chars: int = int(os.getenv("LLM_CHAT_CONTEXT_MAX_CHARS", "200000"))
+    llm_embed_context_max_chars: int = int(os.getenv("LLM_EMBED_CONTEXT_MAX_CHARS", "8000"))
+    llm_qwen_local_chat_model: str = os.getenv("LLM_QWEN_LOCAL_CHAT_MODEL", "qwen3.5:27b")
+    llm_qwen_local_chat_base_url: str = os.getenv("LLM_QWEN_LOCAL_CHAT_BASE_URL", "http://localhost:11434/v1")
+    llm_qwen_local_chat_api_key_path: str = os.getenv("LLM_QWEN_LOCAL_CHAT_API_KEY_PATH", "temp/key/local_key")
+    llm_qwen_local_chat_timeout_seconds: int = int(
+        os.getenv("LLM_QWEN_LOCAL_CHAT_TIMEOUT_SECONDS", os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+    )
 
 
 settings = Settings()

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,12 +25,18 @@ class OpenAICompatibleTextModel(ChatModelBase, ParseModelBase):
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
 
     def _run(self, messages: List[Dict[str, str]], default: str = "") -> str:
+        print("[LLMDebug] OpenAICompatibleTextModel._run.input.messages:")
+        print(json.dumps(messages or [], ensure_ascii=False, indent=2))
+        print(f"[LLMDebug] OpenAICompatibleTextModel._run.input.default: {default!r}")
         if not self.model or not self.api_key or not self.base_url:
             return default
         try:
             resp = self.client.chat.completions.create(model=self.model, messages=messages)
             content = resp.choices[0].message.content if resp and resp.choices else ""
-            return str(content or "").strip() or default
+            result = str(content or "").strip() or default
+            print("[LLMDebug] OpenAICompatibleTextModel._run.output:")
+            print(result)
+            return result
         except Exception:
             return default
 

@@ -2,30 +2,48 @@
   <div class="page-shell">
     <div class="page-header">
       <div>
-        <h2 class="page-title">知识库管理 - {{ fixedClassification || "全部类别" }}</h2>
-        <div class="page-desc">当前页面仅管理该分类下的知识文件，支持查询、语义检索与文件维护</div>
+        <h2 class="page-title">知识库管理 - {{ displayClassification || "全部类别" }}</h2>
+        <div class="page-desc">按当前知识类别维护上传元信息、查询条件、异步解析和语义检索结果。</div>
       </div>
       <div class="header-actions">
-        <input
-          ref="uploadInput"
-          class="hidden-upload-input"
-          type="file"
-          multiple
-          accept=".pdf,.doc,.docx,.txt,.md"
-          @change="onNativeFileChange"
-        />
-        <el-button type="primary" :loading="uploading" @click="onPickFiles">上传文件</el-button>
+        <el-button :disabled="!selectedRows.length" @click="clearSelected">取消选择</el-button>
+        <el-button type="danger" :disabled="!selectedRows.length" @click="removeSelectedRows">批量删除</el-button>
+        <el-button type="primary" :loading="uploading" @click="openUploadDialog">上传文件</el-button>
       </div>
     </div>
 
     <el-card class="k-card">
       <div slot="header">知识查询</div>
+
       <el-form :inline="true" size="small">
         <el-form-item label="文件名">
-          <el-input v-model="filters.file_name" />
+          <el-input v-model="filters.file_name" clearable />
         </el-form-item>
         <el-form-item label="关键词">
-          <el-input v-model="filters.keyword" />
+          <el-input v-model="filters.keyword" clearable />
+        </el-form-item>
+        <el-form-item v-if="showFilter('affect_range')" :label="rangeLabel">
+          <el-select v-model="filters.affect_range" clearable style="width: 160px">
+            <el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="showFilter('profession_classification')" label="专业分类">
+          <el-select v-model="filters.profession_classification" clearable style="width: 160px">
+            <el-option v-for="item in professionOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="showFilter('registration_scope')" label="注册大类">
+          <el-select v-model="filters.registration_scope" clearable style="width: 160px" @change="onFilterRegistrationScopeChange">
+            <el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="showFilter('registration_path')" label="注册分类路径">
+          <el-cascader v-model="filterRegistrationPath" :options="filterRegistrationOptions" :props="registrationCascaderProps" clearable filterable style="width: 300px" @change="onFilterRegistrationPathChange" />
+        </el-form-item>
+        <el-form-item v-if="showFilter('experience_type')" label="经验类型">
+          <el-select v-model="filters.experience_type" clearable style="width: 160px">
+            <el-option v-for="item in experienceTypeOptions" :key="item" :label="item" :value="item" />
+          </el-select>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="onSearch">查询</el-button>
@@ -34,82 +52,69 @@
 
       <el-form :inline="true" size="small" style="margin-top: 8px">
         <el-form-item label="语义检索">
-          <el-input v-model="semantic.query" placeholder="请输入问题" style="width: 460px" />
+          <el-input v-model="semantic.query" placeholder="请输入检索问题" style="width: 460px" />
         </el-form-item>
         <el-form-item>
           <el-button :loading="semantic.loading" @click="doSemantic">检索</el-button>
         </el-form-item>
       </el-form>
 
-      <el-table :data="table.list" border class="k-table" style="margin-top: 12px">
-        <el-table-column prop="doc_id" label="文件ID" min-width="170" />
-        <el-table-column prop="file_name" label="文件名" min-width="220" />
-        <el-table-column prop="is_chunked" label="解析状态" width="130">
-          <template slot-scope="s">
-            <span v-if="s.row.parse_status === 'running' || s.row.parse_status === 'pending'">
-              <i class="el-icon-loading" style="margin-right: 4px"></i>解析中
-            </span>
-            <span v-else-if="s.row.parse_status === 'completed' || s.row.is_chunked">已完成</span>
-            <span v-else-if="s.row.parse_status === 'failed'">失败</span>
+      <el-table ref="knowledgeTable" :data="table.list" :row-key="getRowKey" border class="k-table compact-table" style="margin-top: 12px" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="48" reserve-selection />
+        <el-table-column prop="file_name" label="文件名" min-width="240" show-overflow-tooltip />
+        <el-table-column v-if="showColumn('affect_range')" prop="affect_range" :label="rangeLabel" width="110" />
+        <el-table-column v-if="showColumn('profession_classification')" prop="profession_classification" label="专业分类" width="120" />
+        <el-table-column v-if="showColumn('registration_scope')" prop="registration_scope" label="注册大类" width="100" />
+        <el-table-column v-if="showColumn('registration_path')" prop="registration_path" label="注册分类路径" min-width="180" show-overflow-tooltip />
+        <el-table-column v-if="showColumn('experience_type')" prop="experience_type" label="经验类型" width="110" />
+        <el-table-column label="解析状态" width="110">
+          <template slot-scope="scope">
+            <span v-if="scope.row.parse_status === 'running' || scope.row.parse_status === 'pending'"><i class="el-icon-loading" style="margin-right: 4px" />解析中</span>
+            <span v-else-if="scope.row.parse_status === 'completed' || scope.row.is_chunked">已完成</span>
+            <span v-else-if="scope.row.parse_status === 'failed'">失败</span>
             <span v-else>未开始</span>
           </template>
         </el-table-column>
-        <el-table-column label="进度" width="220">
-          <template slot-scope="s">
-            <el-progress
-              :percentage="Math.round((Number(s.row.parse_progress || 0) || 0) * 100)"
-              :status="s.row.parse_status === 'failed' ? 'exception' : (s.row.parse_status === 'completed' || s.row.is_chunked) ? 'success' : undefined"
-              :stroke-width="12"
-            />
+        <el-table-column label="进度" width="120">
+          <template slot-scope="scope">
+            <div class="progress-cell">
+              <el-progress
+                type="circle"
+                :width="42"
+                :stroke-width="5"
+                :show-text="false"
+                :percentage="Math.round((Number(scope.row.parse_progress || 0) || 0) * 100)"
+                :status="progressStatus(scope.row)"
+              />
+              <div class="progress-number">{{ Math.round((Number(scope.row.parse_progress || 0) || 0) * 100) }}%</div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="chunk_size" label="分块数" width="90" />
-        <el-table-column prop="create_time" label="上传时间" width="170" />
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column prop="create_time" label="上传时间" width="165" />
+        <el-table-column label="操作" width="200">
           <template slot-scope="scope">
-            <el-button
-              type="text"
-              :disabled="scope.row.parse_status === 'running' || scope.row.parse_status === 'pending'"
-              @click="triggerParse(scope.row)"
-            >
-              解析
-            </el-button>
+            <el-button type="text" :disabled="scope.row.parse_status === 'running' || scope.row.parse_status === 'pending'" @click="triggerParse(scope.row)">解析</el-button>
             <el-button type="text" @click="editRow(scope.row)">编辑</el-button>
             <el-button type="text" style="color: #d03050" @click="removeRow(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
 
-      <el-pagination
-        style="margin-top: 12px; text-align: right"
-        layout="total, prev, pager, next"
-        :total="table.total"
-        :page-size="table.page_size"
-        :current-page.sync="table.page"
-        @current-change="search"
-      />
+      <el-pagination style="margin-top: 12px; text-align: right" layout="total, prev, pager, next" :total="table.total" :page-size="table.page_size" :current-page.sync="table.page" @current-change="search" />
 
       <el-divider>语义检索结果（按文档聚合）</el-divider>
       <el-empty v-if="!semantic.loading && !semantic.grouped_docs.length" description="暂无检索结果" />
-
       <div class="doc-card-list" v-loading="semantic.loading">
         <el-card v-for="doc in semantic.grouped_docs" :key="doc.doc_id" class="doc-card" shadow="hover">
           <div slot="header" class="doc-card-header">
             <div><span class="doc-id">{{ doc.doc_id }}</span></div>
             <el-tag size="mini" type="info">命中 {{ (doc.matched_hits || []).length }} 条</el-tag>
           </div>
-
-          <div class="doc-summary" v-if="doc.doc_summary">
-            <span class="label">整文摘要：</span><span>{{ doc.doc_summary }}</span>
-          </div>
-
+          <div class="doc-summary" v-if="doc.doc_summary"><span class="label">整文摘要：</span><span>{{ doc.doc_summary }}</span></div>
           <div class="doc-keywords" v-if="(doc.doc_keywords || []).length">
             <span class="label">整文关键词：</span>
-            <el-tag v-for="kw in doc.doc_keywords" :key="`${doc.doc_id}-${kw}`" size="mini" type="success" effect="plain" class="kw-tag">
-              {{ kw }}
-            </el-tag>
+            <el-tag v-for="kw in doc.doc_keywords" :key="`${doc.doc_id}-${kw}`" size="mini" type="success" effect="plain" class="kw-tag">{{ kw }}</el-tag>
           </div>
-
           <div class="block-title">命中片段</div>
           <div v-if="!(doc.matched_hits || []).length" class="placeholder">无命中片段</div>
           <div v-for="(hit, idx) in doc.matched_hits || []" :key="`${doc.doc_id}-hit-${idx}`" class="hit-row">
@@ -117,8 +122,10 @@
               <el-tag size="mini" type="warning" effect="plain">{{ hit.item_type || "chunk" }}</el-tag>
               <span>chunk: {{ hit.chunk_id || "-" }}</span>
               <span>score: {{ formatScore(hit.score) }}</span>
+              <span v-if="hit.page_start || hit.page_end">页码: {{ renderPageSpan(hit) }}</span>
             </div>
             <div class="hit-summary">{{ hit.summary || "（无摘要）" }}</div>
+            <div v-if="hit.content" class="related-text">{{ hit.content }}</div>
           </div>
 
           <el-collapse class="related-collapse">
@@ -132,7 +139,7 @@
                 <div class="related-meta">
                   <span>chunk: {{ rel.chunk_id || "-" }}</span>
                   <span>order: {{ rel.chunk_order || "-" }}</span>
-                  <span>page: {{ rel.page || "-" }}</span>
+                  <span>page: {{ rel.page || rel.page_start || "-" }}</span>
                 </div>
                 <div class="related-summary">{{ rel.summary || "（无摘要）" }}</div>
                 <div class="related-text">{{ rel.text || "" }}</div>
@@ -143,41 +150,158 @@
       </div>
     </el-card>
 
-    <el-dialog title="编辑知识" :visible.sync="edit.visible" width="520px">
-      <el-form label-width="90px" size="small">
-        <el-form-item label="文件名">
-          <el-input v-model="edit.file_name" />
+    <el-dialog title="上传知识文件" :visible.sync="uploadDialog.visible" width="620px">
+      <el-form label-width="110px" size="small">
+        <el-form-item label="选择文件">
+          <input
+            ref="uploadInput"
+            class="hidden-upload-input"
+            type="file"
+            multiple
+            accept=".pdf,.doc,.docx,.txt,.md,.zip"
+            @change="onNativeFileChange"
+          />
+          <div class="upload-picker-box">
+            <div class="upload-picker-text">支持 PDF、Word、TXT、Markdown、ZIP 压缩包。ZIP 会自动解压并批量导入。</div>
+            <el-button size="small" @click="onPickFiles">选择文件</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="已选文件">
+          <div v-if="uploadDialog.files.length" class="selected-file-list">
+            <div v-for="file in uploadDialog.files" :key="`${file.name}-${file.size}`" class="selected-file-item">{{ file.name }}</div>
+          </div>
+          <div v-else class="placeholder">尚未选择文件</div>
+        </el-form-item>
+        <el-form-item v-if="showUploadField('affect_range')" :label="rangeLabel">
+          <el-select v-model="uploadForm.affect_range" placeholder="请选择" style="width: 100%"><el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" /></el-select>
+        </el-form-item>
+        <el-form-item v-if="showUploadField('profession_classification')" label="专业分类">
+          <el-select v-model="uploadForm.profession_classification" placeholder="请选择" style="width: 100%"><el-option v-for="item in professionOptions" :key="item" :label="item" :value="item" /></el-select>
+        </el-form-item>
+        <el-form-item v-if="showUploadField('registration_scope')" label="注册大类">
+          <el-select v-model="uploadForm.registration_scope" placeholder="请选择" style="width: 100%" @change="onUploadRegistrationScopeChange"><el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" /></el-select>
+        </el-form-item>
+        <el-form-item v-if="showUploadField('registration_path')" label="注册分类路径">
+          <el-cascader v-model="uploadRegistrationPath" :options="uploadRegistrationOptions" :props="registrationCascaderProps" clearable filterable style="width: 100%" @change="onUploadRegistrationPathChange" />
+        </el-form-item>
+        <el-form-item v-if="showUploadField('experience_type')" label="经验类型">
+          <el-select v-model="uploadForm.experience_type" placeholder="请选择" style="width: 100%"><el-option v-for="item in experienceTypeOptions" :key="item" :label="item" :value="item" /></el-select>
         </el-form-item>
       </el-form>
-      <span slot="footer">
-        <el-button @click="edit.visible = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit">保存</el-button>
-      </span>
+      <span slot="footer"><el-button @click="closeUploadDialog">取消</el-button><el-button type="primary" :loading="uploading" @click="confirmUpload">开始上传</el-button></span>
+    </el-dialog>
+
+    <el-dialog title="编辑知识文件" :visible.sync="edit.visible" width="560px">
+      <el-form label-width="110px" size="small">
+        <el-form-item label="文件名"><el-input v-model="edit.file_name" /></el-form-item>
+        <el-form-item v-if="showUploadField('affect_range')" :label="rangeLabel"><el-select v-model="edit.affect_range" style="width: 100%"><el-option label="other" value="other" /><el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+        <el-form-item v-if="showUploadField('profession_classification')" label="专业分类"><el-select v-model="edit.profession_classification" style="width: 100%"><el-option label="other" value="other" /><el-option v-for="item in professionOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+        <el-form-item v-if="showUploadField('registration_scope')" label="注册大类"><el-select v-model="edit.registration_scope" style="width: 100%" @change="onEditRegistrationScopeChange"><el-option label="other" value="other" /><el-option v-for="item in affectRangeOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+        <el-form-item v-if="showUploadField('registration_path')" label="注册分类路径"><el-cascader v-model="editRegistrationPath" :options="editRegistrationOptions" :props="registrationCascaderProps" clearable filterable style="width: 100%" @change="onEditRegistrationPathChange" /></el-form-item>
+        <el-form-item v-if="showUploadField('experience_type')" label="经验类型"><el-select v-model="edit.experience_type" style="width: 100%"><el-option label="other" value="other" /><el-option v-for="item in experienceTypeOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+      </el-form>
+      <span slot="footer"><el-button @click="edit.visible = false">取消</el-button><el-button type="primary" @click="saveEdit">保存</el-button></span>
     </el-dialog>
   </div>
 </template>
 
 <script>
-import { uploadKnowledge, queryKnowledge, semanticQuery, updateKnowledge, deleteKnowledge, parseKnowledge } from "@/api/knowledge";
+import {
+  batchDeleteKnowledge,
+  deleteKnowledge,
+  parseKnowledge,
+  queryKnowledge,
+  semanticQuery,
+  updateKnowledge,
+  uploadKnowledge,
+} from "@/api/knowledge";
+import {
+  EXPERIENCE_TYPE_OPTIONS,
+  KNOWLEDGE_FORM_OPTIONS,
+  getKnowledgeCategoryMeta,
+  getRegistrationOptionsByScope,
+} from "@/constants/knowledgeCategory";
 
 export default {
   name: "KnowledgeManage",
+  props: {
+    classification: {
+      type: String,
+      default: "",
+    },
+    displayNameProp: {
+      type: String,
+      default: "",
+    },
+  },
   data() {
     return {
-      classOptions: ["指导原则", "制度规范", "法律法规", "药典数据", "历史经验", "共性问题", "审评规则"],
       uploading: false,
-      filters: { file_name: "", keyword: "", file_type: "", classification: "" },
-      table: { list: [], total: 0, page: 1, page_size: 10 },
-      semantic: { query: "", hits: [], grouped_docs: [], loading: false },
-      edit: { visible: false, doc_id: "", file_name: "" },
-      progressStream: null,
       querying: false,
       pendingQuery: false,
+      selectedRows: [],
+      progressStream: null,
+      filters: {
+        file_name: "",
+        keyword: "",
+        file_type: "",
+        classification: "",
+        affect_range: "",
+        profession_classification: "",
+        registration_scope: "",
+        registration_path: "",
+        experience_type: "",
+      },
+      filterRegistrationPath: [],
+      table: { list: [], total: 0, page: 1, page_size: 10 },
+      semantic: { query: "", hits: [], grouped_docs: [], loading: false },
+      uploadDialog: { visible: false, files: [] },
+      uploadForm: {
+        affect_range: KNOWLEDGE_FORM_OPTIONS.affect_range[0] || "",
+        profession_classification: KNOWLEDGE_FORM_OPTIONS.profession_classification[0] || "",
+        registration_scope: KNOWLEDGE_FORM_OPTIONS.affect_range[0] || "",
+        registration_path: "",
+        experience_type: EXPERIENCE_TYPE_OPTIONS[0] || "",
+      },
+      uploadRegistrationPath: [],
+      edit: {
+        visible: false,
+        doc_id: "",
+        file_name: "",
+        affect_range: "other",
+        profession_classification: "other",
+        registration_scope: "other",
+        registration_path: "",
+        experience_type: "other",
+      },
+      editRegistrationPath: [],
+      affectRangeOptions: KNOWLEDGE_FORM_OPTIONS.affect_range,
+      professionOptions: KNOWLEDGE_FORM_OPTIONS.profession_classification,
+      experienceTypeOptions: EXPERIENCE_TYPE_OPTIONS,
+      registrationCascaderProps: { value: "value", label: "label", children: "children", emitPath: true, checkStrictly: false },
     };
   },
   computed: {
     fixedClassification() {
-      return (this.$route.meta && this.$route.meta.classification) || "";
+      return this.classification || (this.$route.meta && this.$route.meta.classification) || "";
+    },
+    categoryMeta() {
+      return getKnowledgeCategoryMeta(this.fixedClassification);
+    },
+    displayClassification() {
+      return this.displayNameProp || this.categoryMeta.displayName || this.fixedClassification;
+    },
+    rangeLabel() {
+      return this.categoryMeta.mode === "review_rule" ? "注册大类" : "作用范围";
+    },
+    filterRegistrationOptions() {
+      return getRegistrationOptionsByScope(this.filters.registration_scope);
+    },
+    uploadRegistrationOptions() {
+      return getRegistrationOptionsByScope(this.uploadForm.registration_scope);
+    },
+    editRegistrationOptions() {
+      return getRegistrationOptionsByScope(this.edit.registration_scope);
     },
   },
   watch: {
@@ -189,103 +313,169 @@ export default {
   mounted() {
     this.applyCategoryFromRoute();
     this.search();
-    this.openProgressStream();
   },
   beforeDestroy() {
     this.closeProgressStream();
   },
   methods: {
-    applyCategoryFromRoute() {
-      const c = this.fixedClassification;
-      if (!c) return;
-      this.filters.classification = c;
+    unwrapApiData(res) {
+      if (res && typeof res === "object" && res.data && typeof res.data === "object") {
+        return res.data;
+      }
+      return res || {};
     },
-    formatScore(v) {
-      const n = Number(v);
-      return Number.isFinite(n) ? n.toFixed(4) : "-";
+    hasActiveParseTasks() {
+      return (this.table.list || []).some((item) => ["pending", "running"].includes(String(item.parse_status || "")));
+    },
+    syncProgressStream() {
+      if (this.hasActiveParseTasks()) {
+        if (!this.progressStream) {
+          this.openProgressStream();
+        }
+        return;
+      }
+      this.closeProgressStream();
+    },
+    openProgressStream() {
+      if (this.progressStream || typeof EventSource === "undefined") {
+        return;
+      }
+      if (typeof EventSource === "undefined") {
+        return;
+      }
+      const source = new EventSource("/api/knowledge/parse-progress/stream");
+      this.progressStream = source;
+      const handlePayload = (payload) => {
+        if (!payload || !Array.isArray(payload.tasks) || !payload.tasks.length) return;
+        const taskMap = new Map(
+          payload.tasks
+            .filter((item) => item && item.doc_id)
+            .map((item) => [
+              item.doc_id,
+              {
+                parse_status: item.status || "unknown",
+                parse_progress: typeof item.progress === "number" ? item.progress : Number(item.progress || 0) || 0,
+                parse_message: item.message || "",
+              },
+            ])
+        );
+        if (!taskMap.size) return;
+        this.table.list = (this.table.list || []).map((item) => {
+          const task = taskMap.get(item.doc_id);
+          return task ? { ...item, ...task } : item;
+        });
+        this.syncProgressStream();
+      };
+      source.addEventListener("progress", (event) => {
+        try {
+          handlePayload(JSON.parse(event.data || "{}"));
+        } catch (_) {}
+      });
+      source.addEventListener("error", () => {
+        this.closeProgressStream();
+        window.setTimeout(() => {
+          this.openProgressStream();
+        }, 3000);
+      });
+    },
+    closeProgressStream() {
+      if (this.progressStream) {
+        this.progressStream.close();
+        this.progressStream = null;
+      }
+    },
+    getRowKey(row) {
+      return row && row.doc_id;
+    },
+    applyCategoryFromRoute() {
+      this.affectRangeOptions = this.categoryMeta.affectRangeOptions || KNOWLEDGE_FORM_OPTIONS.affect_range;
+      this.professionOptions = this.categoryMeta.professionOptions || KNOWLEDGE_FORM_OPTIONS.profession_classification;
+      this.filters.classification = this.fixedClassification || "";
+      this.filters.affect_range = "";
+      this.filters.profession_classification = "";
+      this.filters.registration_scope = "";
+      this.filters.registration_path = "";
+      this.filters.experience_type = "";
+      this.filterRegistrationPath = [];
+      this.uploadForm.affect_range = this.affectRangeOptions[0] || "";
+      this.uploadForm.profession_classification = this.professionOptions[0] || "";
+    },
+    showFilter(field) {
+      return this.categoryMeta.queryFields.includes(field);
+    },
+    showUploadField(field) {
+      return this.categoryMeta.uploadFields.includes(field);
+    },
+    showColumn(field) {
+      return this.showFilter(field) || this.showUploadField(field);
+    },
+    openUploadDialog() {
+      this.uploadDialog.visible = true;
     },
     onPickFiles() {
-      if (this.uploading) return;
-      const input = this.$refs.uploadInput;
-      if (!input) return;
-      input.value = "";
-      input.click();
+      if (this.uploading || !this.$refs.uploadInput) return;
+      this.$refs.uploadInput.value = "";
+      this.$refs.uploadInput.click();
     },
-    async onNativeFileChange(e) {
-      const files = Array.from((e && e.target && e.target.files) || []);
+    onNativeFileChange(event) {
+      const files = Array.from((event && event.target && event.target.files) || []);
       if (!files.length) return;
-      await this.uploadSelectedFiles(files);
+      this.uploadDialog.files = files;
     },
-    async uploadSelectedFiles(files) {
-      this.uploading = true;
-      let successCount = 0;
-      let failCount = 0;
-      const classification = this.fixedClassification || this.filters.classification || this.classOptions[0];
-      try {
-        for (const item of files) {
-          const tempId = `temp_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-          const optimisticRow = {
-            doc_id: tempId,
-            file_name: item.name,
-            file_type: item.name && item.name.includes(".") ? item.name.split(".").pop().toLowerCase() : "",
-            classification,
-            create_time: "",
-            is_chunked: false,
-            chunk_size: 0,
-            parse_status: "pending",
-            parse_progress: 0,
-          };
-          this.table.list.unshift(optimisticRow);
-          this.table.list = this.table.list.slice(0, this.table.page_size);
-
-          const fd = new FormData();
-          fd.append("file", item);
-          fd.append("classification", classification);
-          fd.append("affect_range", "other");
-          try {
-            const res = await uploadKnowledge(fd);
-            const meta = (res && res.data) || {};
-            const pendingRow = {
-              ...meta,
-              file_name: meta.file_name || item.name,
-              file_type: meta.file_type || (item.name && item.name.includes(".") ? item.name.split(".").pop().toLowerCase() : ""),
-              classification: meta.classification || classification,
-              create_time: meta.create_time || "",
-              is_chunked: false,
-              chunk_size: meta.chunk_size || 0,
-              parse_status: meta.parse_status || "pending",
-              parse_progress: typeof meta.parse_progress === "number" ? meta.parse_progress : 0,
-            };
-            const tempIndex = this.table.list.findIndex((x) => x.doc_id === tempId);
-            if (tempIndex >= 0) {
-              this.table.list.splice(tempIndex, 1, pendingRow);
-            }
-            this.table.total += 1;
-            successCount += 1;
-          } catch (_) {
-            const tempIndex = this.table.list.findIndex((x) => x.doc_id === tempId);
-            if (tempIndex >= 0) {
-              this.table.list.splice(tempIndex, 1);
-            }
-            failCount += 1;
-          }
-        }
-
-        if (successCount > 0 && failCount === 0) {
-          this.$message.success("上传成功，后台正在解析");
-        } else if (successCount > 0 && failCount > 0) {
-          this.$message.warning(`部分上传成功：成功 ${successCount}，失败 ${failCount}`);
-        } else {
-          this.$message.error("上传失败");
-        }
-      } finally {
-        this.uploading = false;
-        this.search();
-      }
+    closeUploadDialog() {
+      this.uploadDialog.visible = false;
+      this.uploadDialog.files = [];
+      this.uploadForm = {
+        affect_range: this.affectRangeOptions[0] || "",
+        profession_classification: this.professionOptions[0] || "",
+        registration_scope: this.affectRangeOptions[0] || "",
+        registration_path: "",
+        experience_type: this.experienceTypeOptions[0] || "",
+      };
+      this.uploadRegistrationPath = this.showUploadField("registration_scope") ? [this.uploadForm.registration_scope] : [];
+    },
+    onFilterRegistrationScopeChange() {
+      this.filterRegistrationPath = this.filters.registration_scope ? [this.filters.registration_scope] : [];
+      this.filters.registration_path = "";
+    },
+    onFilterRegistrationPathChange(path) {
+      this.filterRegistrationPath = Array.isArray(path) ? path : [];
+      this.filters.registration_scope = this.filterRegistrationPath[0] || this.filters.registration_scope;
+      this.filters.registration_path = this.filterRegistrationPath.join(" > ");
+    },
+    onUploadRegistrationScopeChange() {
+      this.uploadRegistrationPath = this.uploadForm.registration_scope ? [this.uploadForm.registration_scope] : [];
+      this.uploadForm.registration_path = "";
+    },
+    onUploadRegistrationPathChange(path) {
+      this.uploadRegistrationPath = Array.isArray(path) ? path : [];
+      this.uploadForm.registration_scope = this.uploadRegistrationPath[0] || this.uploadForm.registration_scope;
+      this.uploadForm.registration_path = this.uploadRegistrationPath.join(" > ");
+    },
+    onEditRegistrationScopeChange() {
+      this.editRegistrationPath = this.edit.registration_scope && this.edit.registration_scope !== "other" ? [this.edit.registration_scope] : [];
+      this.edit.registration_path = "";
+    },
+    onEditRegistrationPathChange(path) {
+      this.editRegistrationPath = Array.isArray(path) ? path : [];
+      this.edit.registration_scope = this.editRegistrationPath[0] || this.edit.registration_scope;
+      this.edit.registration_path = this.editRegistrationPath.join(" > ");
+    },
+    progressStatus(row) {
+      if (row.parse_status === "failed") return "exception";
+      if (row.parse_status === "completed" || row.is_chunked) return "success";
+      return undefined;
+    },
+    formatScore(value) {
+      const num = Number(value);
+      return Number.isFinite(num) ? num.toFixed(4) : "-";
+    },
+    renderPageSpan(hit) {
+      if (hit.page_start && hit.page_end && hit.page_start !== hit.page_end) return `${hit.page_start}-${hit.page_end}`;
+      return hit.page_start || hit.page_end || "-";
     },
     onSearch() {
       this.table.page = 1;
-      this.applyCategoryFromRoute();
       this.search();
     },
     async search() {
@@ -300,19 +490,36 @@ export default {
           keyword: this.filters.keyword,
           file_type: this.filters.file_type,
           classification: this.filters.classification,
+          affect_range: this.filters.affect_range,
+          profession_classification: this.filters.profession_classification,
+          registration_scope: this.filters.registration_scope,
+          registration_path: this.filters.registration_path,
+          experience_type: this.filters.experience_type,
           page: this.table.page,
           page_size: this.table.page_size,
         });
-        this.table.list = (res.data && res.data.list) || [];
-        this.table.list = this.table.list.map((x) => ({
-          ...x,
-          parse_status: x.parse_status || (x.is_chunked ? "completed" : "unknown"),
-          parse_progress: typeof x.parse_progress === "number" ? x.parse_progress : x.is_chunked ? 1 : 0,
+        const data = this.unwrapApiData(res);
+        const list = Array.isArray(data.list) ? data.list : [];
+        this.table.list = list.map((item) => ({
+          ...item,
+          parse_status: item.parse_status || (item.is_chunked ? "completed" : "unknown"),
+          parse_progress: typeof item.parse_progress === "number" ? item.parse_progress : item.is_chunked ? 1 : 0,
+          affect_range: item.affect_range || "other",
+          profession_classification: item.profession_classification || "other",
+          registration_scope: item.registration_scope || "other",
+          registration_path: item.registration_path || "",
+          experience_type: item.experience_type || "other",
         }));
-        this.table.total = (res.data && res.data.total) || 0;
-      } catch (_) {
+        this.table.total = Number(data.total || 0);
+        this.syncSelectedRows();
+        this.syncProgressStream();
+      } catch (error) {
         this.table.list = [];
         this.table.total = 0;
+        this.selectedRows = [];
+        this.closeProgressStream();
+        const msg = (error && error.message) || "加载知识库列表失败";
+        this.$message.error(msg);
       } finally {
         this.querying = false;
         if (this.pendingQuery) {
@@ -321,81 +528,42 @@ export default {
         }
       }
     },
-    openProgressStream() {
-      this.closeProgressStream();
+    async confirmUpload() {
+      if (!this.uploadDialog.files.length) {
+        this.$message.warning("请先选择上传文件");
+        return;
+      }
+      await this.uploadSelectedFiles(this.uploadDialog.files);
+      this.closeUploadDialog();
+    },
+    async uploadSelectedFiles(files) {
+      this.uploading = true;
+      const classification = this.fixedClassification || this.filters.classification || "指导原则";
       try {
-        const es = new EventSource("/api/knowledge/parse-progress/stream");
-        es.addEventListener("progress", (evt) => {
-          try {
-            const payload = JSON.parse(evt.data || "{}");
-            this.applyProgressUpdates(payload.tasks || []);
-          } catch (_) {}
-        });
-        es.onerror = () => {};
-        this.progressStream = es;
-      } catch (_) {}
-    },
-    closeProgressStream() {
-      if (this.progressStream) {
-        this.progressStream.close();
-        this.progressStream = null;
+        const fd = new FormData();
+        files.forEach((file) => fd.append("files", file));
+        fd.append("classification", classification);
+        fd.append("affect_range", this.showUploadField("affect_range") ? this.uploadForm.affect_range : "other");
+        fd.append("profession_classification", this.showUploadField("profession_classification") ? this.uploadForm.profession_classification : "other");
+        fd.append("registration_scope", this.showUploadField("registration_scope") ? this.uploadForm.registration_scope : "other");
+        fd.append("registration_path", this.showUploadField("registration_path") ? this.uploadForm.registration_path : "");
+        fd.append("experience_type", this.showUploadField("experience_type") ? this.uploadForm.experience_type : "other");
+
+        const res = await uploadKnowledge(fd);
+        const payload = this.unwrapApiData(res);
+        const items = Array.isArray(payload.items) ? payload.items : (payload.doc_id ? [payload] : []);
+        const successCount = Number(payload.success_count || items.length || 0);
+        const failCount = Number(payload.fail_count || 0);
+        if (successCount) {
+          this.$message.success(`上传成功 ${successCount} 个文件`);
+        }
+        if (failCount) {
+          this.$message.warning(`有 ${failCount} 个文件上传失败`);
+        }
+        await this.search();
+      } finally {
+        this.uploading = false;
       }
-    },
-    applyProgressUpdates(tasks) {
-      if (!Array.isArray(tasks) || !tasks.length) return;
-      const byDoc = {};
-      tasks.forEach((t) => {
-        if (t && t.doc_id) byDoc[t.doc_id] = t;
-      });
-      let shouldRefresh = false;
-      this.table.list = this.table.list.map((row) => {
-        const t = byDoc[row.doc_id];
-        if (!t) return row;
-        const prevStatus = row.parse_status || (row.is_chunked ? "completed" : "unknown");
-        const nextStatus = t.status || prevStatus;
-        const next = {
-          ...row,
-          parse_status: nextStatus,
-          parse_progress: typeof t.progress === "number" ? t.progress : row.parse_progress,
-        };
-        if (nextStatus === "completed") {
-          next.is_chunked = true;
-          if (typeof t.chunk_size === "number" && t.chunk_size >= 0) {
-            next.chunk_size = t.chunk_size;
-          }
-          if (prevStatus !== "completed") {
-            shouldRefresh = true;
-          }
-        }
-        if (nextStatus === "failed" && prevStatus !== "failed") {
-          shouldRefresh = true;
-        }
-        return next;
-      });
-      if (shouldRefresh) {
-        this.search();
-      }
-    },
-    buildGroupedFromHits(hits) {
-      const groupMap = {};
-      (hits || []).forEach((h) => {
-        const docId = h.doc_id || "";
-        if (!docId) return;
-        if (!groupMap[docId]) {
-          groupMap[docId] = {
-            doc_id: docId,
-            doc_summary: h.doc_summary || "",
-            doc_keywords: h.doc_keywords || [],
-            matched_hits: [],
-            related_chunks: h.related_chunks || [],
-          };
-        }
-        groupMap[docId].matched_hits.push({ chunk_id: h.chunk_id, item_type: h.item_type, score: h.score, summary: h.summary });
-        if ((!groupMap[docId].related_chunks || !groupMap[docId].related_chunks.length) && h.related_chunks) {
-          groupMap[docId].related_chunks = h.related_chunks;
-        }
-      });
-      return Object.values(groupMap);
     },
     async doSemantic() {
       if (!this.semantic.query) {
@@ -405,24 +573,26 @@ export default {
       this.semantic.loading = true;
       try {
         const res = await semanticQuery({ query: this.semantic.query, top_k: 10, min_score: 0.6, classification: this.filters.classification || "" });
-        const data = (res && res.data) || {};
+        const data = this.unwrapApiData(res);
         const list = Array.isArray(data.list) ? data.list : Array.isArray(data.hits) ? data.hits : [];
-        const grouped = Array.isArray(data.grouped_docs) ? data.grouped_docs : this.buildGroupedFromHits(list);
         this.semantic.hits = list;
-        this.semantic.grouped_docs = grouped;
-      } catch (_) {
+        this.semantic.grouped_docs = Array.isArray(data.grouped_docs) ? data.grouped_docs : this.buildGroupedFromHits(list);
+      } catch (error) {
         this.semantic.hits = [];
         this.semantic.grouped_docs = [];
+        const msg = (error && error.message) || "语义检索失败";
+        this.$message.error(msg);
       } finally {
         this.semantic.loading = false;
       }
     },
     editRow(row) {
-      this.edit = { visible: true, doc_id: row.doc_id, file_name: row.file_name };
+      this.edit = { visible: true, doc_id: row.doc_id, file_name: row.file_name, affect_range: row.affect_range || "other", profession_classification: row.profession_classification || "other", registration_scope: row.registration_scope || "other", registration_path: row.registration_path || "", experience_type: row.experience_type || "other" };
+      this.editRegistrationPath = row.registration_path ? String(row.registration_path).split(" > ") : [];
     },
     async saveEdit() {
       try {
-        await updateKnowledge(this.edit.doc_id, { file_name: this.edit.file_name });
+        await updateKnowledge(this.edit.doc_id, { file_name: this.edit.file_name, affect_range: this.edit.affect_range, profession_classification: this.edit.profession_classification, registration_scope: this.edit.registration_scope, registration_path: this.edit.registration_path, experience_type: this.edit.experience_type });
         this.$message.success("保存成功");
         this.edit.visible = false;
         this.search();
@@ -436,18 +606,48 @@ export default {
         this.search();
       } catch (_) {}
     },
-    async triggerParse(row) {
-      const docId = (row && row.doc_id) || "";
-      if (!docId) return;
+    onSelectionChange(rows) {
+      this.selectedRows = Array.isArray(rows) ? rows : [];
+    },
+    clearSelected() {
+      if (this.$refs.knowledgeTable) {
+        this.$refs.knowledgeTable.clearSelection();
+      }
+      this.selectedRows = [];
+    },
+    syncSelectedRows() {
+      const selectedIds = new Set((this.selectedRows || []).map((item) => item.doc_id));
+      this.selectedRows = this.table.list.filter((item) => selectedIds.has(item.doc_id));
+    },
+    async removeSelectedRows() {
+      if (!this.selectedRows.length) return;
+      const docIds = this.selectedRows.map((item) => item.doc_id).filter(Boolean);
+      const fileNames = this.selectedRows.map((item) => item.file_name).filter(Boolean);
       try {
-        await parseKnowledge(docId);
+        await this.$confirm(`确认批量删除 ${docIds.length} 个文件？\n${fileNames.slice(0, 5).join("\n")}${fileNames.length > 5 ? "\n..." : ""}`, "提示", { type: "warning" });
+        const res = await batchDeleteKnowledge(docIds);
+        const data = this.unwrapApiData(res);
+        const deletedCount = Number(data.deleted_count || 0);
+        const failedCount = Number(data.failed_count || 0);
+        if (deletedCount) {
+          this.$message.success(`已删除 ${deletedCount} 个文件`);
+        }
+        if (failedCount) {
+          this.$message.warning(`有 ${failedCount} 个文件删除失败`);
+        }
+        this.clearSelected();
+        this.search();
+      } catch (_) {}
+    },
+    async triggerParse(row) {
+      if (!row || !row.doc_id) return;
+      try {
+        await parseKnowledge(row.doc_id);
         this.$message.success("已提交解析任务");
-        this.table.list = this.table.list.map((x) => {
-          if (x.doc_id !== docId) return x;
-          return { ...x, parse_status: "pending", parse_progress: 0 };
-        });
-      } catch (e) {
-        const msg = (e && e.response && e.response.data && e.response.data.message) || e.message || "提交解析失败";
+        this.table.list = this.table.list.map((item) => item.doc_id === row.doc_id ? { ...item, parse_status: "pending", parse_progress: 0 } : item);
+        this.syncProgressStream();
+      } catch (error) {
+        const msg = (error && error.response && error.response.data && error.response.data.message) || error.message || "提交解析失败";
         this.$message.error(msg);
       }
     },
@@ -456,117 +656,30 @@ export default {
 </script>
 
 <style scoped>
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  color: #1f2d3d;
-}
-
-.page-desc {
-  margin-top: 6px;
-  color: #5f6f81;
-  font-size: 13px;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-}
-
-.hidden-upload-input {
-  display: none;
-}
-
-.doc-card-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 12px;
-}
-
-.doc-card {
-  border-radius: 10px;
-}
-
-.doc-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.doc-id {
-  font-weight: 600;
-  color: #303133;
-}
-
-.doc-summary,
-.doc-keywords {
-  margin-bottom: 8px;
-  line-height: 1.6;
-}
-
-.label {
-  color: #606266;
-  font-weight: 600;
-}
-
-.kw-tag {
-  margin-right: 6px;
-  margin-bottom: 6px;
-}
-
-.block-title {
-  margin-top: 8px;
-  margin-bottom: 6px;
-  color: #303133;
-  font-weight: 600;
-}
-
-.hit-row,
-.related-row {
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 8px;
-  margin-bottom: 8px;
-  background: #fafafa;
-}
-
-.hit-meta,
-.related-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 6px;
-  color: #606266;
-  font-size: 12px;
-}
-
-.hit-summary,
-.related-summary,
-.related-text {
-  font-size: 13px;
-  color: #303133;
-  line-height: 1.6;
-}
-
-.related-text {
-  color: #606266;
-  margin-top: 4px;
-}
-
-.placeholder {
-  color: #909399;
-  font-size: 13px;
-}
-
-.related-collapse {
-  margin-top: 10px;
-}
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.page-title { margin: 0; font-size: 20px; font-weight: 700; color: #1f2d3d; }
+.page-desc { margin-top: 6px; color: #5f6f81; font-size: 13px; }
+.header-actions { display: flex; align-items: center; }
+.hidden-upload-input { display: none; }
+.upload-picker-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px dashed #c7d8ee; border-radius: 10px; padding: 12px; background: #f8fbff; }
+.upload-picker-text { color: #5f6f81; line-height: 1.6; }
+.selected-file-list { border: 1px solid #ebeef5; border-radius: 8px; padding: 10px 12px; background: #fafafa; }
+.selected-file-item + .selected-file-item { margin-top: 6px; }
+.doc-card-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; }
+.compact-table ::v-deep .cell { word-break: break-word; }
+.progress-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.progress-number { font-size: 12px; color: #5f6f81; line-height: 1; }
+.doc-card { border-radius: 10px; }
+.doc-card-header { display: flex; align-items: center; justify-content: space-between; }
+.doc-id { font-weight: 600; color: #303133; }
+.doc-summary, .doc-keywords { margin-bottom: 8px; line-height: 1.6; }
+.label { color: #606266; font-weight: 600; }
+.kw-tag { margin-right: 6px; margin-bottom: 6px; }
+.block-title { margin-top: 8px; margin-bottom: 6px; color: #303133; font-weight: 600; }
+.hit-row, .related-row { border: 1px solid #ebeef5; border-radius: 6px; padding: 8px; margin-bottom: 8px; background: #fafafa; }
+.hit-meta, .related-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; color: #606266; font-size: 12px; }
+.hit-summary, .related-summary, .related-text { font-size: 13px; color: #303133; line-height: 1.6; }
+.related-text { color: #606266; margin-top: 4px; }
+.placeholder { color: #909399; font-size: 13px; }
+.related-collapse { margin-top: 10px; }
 </style>

@@ -29,12 +29,16 @@ class HashEmbeddingModel(EmbeddingModelBase):
         return re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", low)
 
     def embed(self, text: str, dimensions: Optional[int] = None) -> List[float]:
+        print(f"[LLMDebug] HashEmbeddingModel.embed.input.dimensions: {dimensions}")
+        print("[LLMDebug] HashEmbeddingModel.embed.input.text:")
+        print(text)
         tokens = self._tokenize(text)
         c = Counter(tokens)
         dim = self.dim if dimensions is None else max(8, int(dimensions))
         vec = [0.0] * dim
         for tok, freq in c.items():
             vec[hash(tok) % dim] += float(freq)
+        print(f"[LLMDebug] HashEmbeddingModel.embed.output.dim: {len(vec)}")
         return vec
 
 
@@ -46,6 +50,9 @@ class OpenAICompatibleEmbeddingModel(EmbeddingModelBase):
         self.timeout = int(conf.get("timeout", 30))
 
     def embed(self, text: str, dimensions: Optional[int] = None) -> List[float]:
+        print(f"[LLMDebug] OpenAICompatibleEmbeddingModel.embed.input.dimensions: {dimensions}")
+        print("[LLMDebug] OpenAICompatibleEmbeddingModel.embed.input.text:")
+        print(text)
         if not self.base_url or not self.model or not self.api_key:
             return []
         payload = {"model": self.model, "input": text}
@@ -68,7 +75,9 @@ class OpenAICompatibleEmbeddingModel(EmbeddingModelBase):
             if isinstance(data, list) and data:
                 emb = data[0].get("embedding", [])
                 if isinstance(emb, list):
-                    return [float(x) for x in emb]
+                    result = [float(x) for x in emb]
+                    print(f"[LLMDebug] OpenAICompatibleEmbeddingModel.embed.output.dim: {len(result)}")
+                    return result
         except (HTTPError, URLError, TimeoutError, ValueError, TypeError, json.JSONDecodeError):
             return []
         except Exception:
@@ -88,15 +97,26 @@ class LexicalRerankModel(RerankModelBase):
         return float(hit) / float(len(q_terms))
 
     def rerank(self, query: str, documents: List[str], top_n: Optional[int] = None) -> List[float]:
-        return [self._score_one(query, d) for d in documents]
+        print(f"[LLMDebug] LexicalRerankModel.rerank.input.query: {query}")
+        print(f"[LLMDebug] LexicalRerankModel.rerank.input.top_n: {top_n}")
+        print(json.dumps(documents or [], ensure_ascii=False, indent=2))
+        result = [self._score_one(query, d) for d in documents]
+        print("[LLMDebug] LexicalRerankModel.rerank.output.scores:")
+        print(json.dumps(result, ensure_ascii=False))
+        return result
 
 
 class HashRerankModel(RerankModelBase):
     def rerank(self, query: str, documents: List[str], top_n: Optional[int] = None) -> List[float]:
+        print(f"[LLMDebug] HashRerankModel.rerank.input.query: {query}")
+        print(f"[LLMDebug] HashRerankModel.rerank.input.top_n: {top_n}")
+        print(json.dumps(documents or [], ensure_ascii=False, indent=2))
         scores: List[float] = []
         q = (query or "").encode("utf-8", errors="ignore")
         for d in documents:
             b = (d or "").encode("utf-8", errors="ignore")
             h = hashlib.md5(q + b).hexdigest()
             scores.append((int(h[:8], 16) % 1000) / 1000.0)
+        print("[LLMDebug] HashRerankModel.rerank.output.scores:")
+        print(json.dumps(scores, ensure_ascii=False))
         return scores

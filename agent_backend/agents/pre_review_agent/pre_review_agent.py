@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.agent_backend.agents.multi_agent import MultiAgentPreReviewWorkflow
 from agent.agent_backend.common_tools.builtin.memory_tool import MemoryTool
+from agent.agent_backend.agents.pre_review_agent.pre_review_state import SectionReviewPacket
 
 
 class PreReviewAgent:
@@ -44,13 +45,22 @@ class PreReviewAgent:
 
     def run(
         self,
-        doc_id: str,
-        section_id: str,
-        content: str,
+        doc_id: str = "",
+        section_id: str = "",
+        content: str = "",
         related_rules: Optional[List[Dict[str, Any]]] = None,
         coordination_payload: Optional[Dict[str, Any]] = None,
         memory_metadata_filter: Optional[Dict[str, Any]] = None,
+        packet: Optional[SectionReviewPacket] = None,
     ) -> Dict[str, Any]:
+        if packet is not None:
+            doc_id = packet.doc_id
+            section_id = packet.section_id
+            content = packet.section_text
+            related_rules = packet.related_rules
+            coordination_payload = packet.coordination_payload
+            memory_metadata_filter = packet.memory_metadata_filter
+
         mem_ctx = self.memory_tool.context(
             query=(content or "")[:300],
             top_k=8,
@@ -72,13 +82,31 @@ class PreReviewAgent:
             "doc_id": doc_id,
             "section_id": section_id,
             "content": content or "",
+            "section_meta": (
+                {
+                    "project_id": packet.project_id,
+                    "run_id": packet.run_id,
+                    "section_code": packet.section_code,
+                    "section_title": packet.section_title,
+                    "title_path": list(packet.title_path),
+                    "page_start": packet.page_start,
+                    "page_end": packet.page_end,
+                    "unit_type": packet.unit_type,
+                }
+                if packet is not None
+                else {}
+            ),
+            "retrieval_context": packet.retrieval_context if packet is not None else {},
             "memory_context": memory_package.get("context_text", ""),
             "memory_package": memory_package,
             "related_rules": related_rules or [],
             "coordination_payload": coordination_payload or {},
+            "run_config": dict(packet.run_config) if packet is not None else {},
+            "prompt_config": dict((packet.run_config or {}).get("prompt_config", {}) or {}) if packet is not None else {},
             "trace": {
                 "memory_package": memory_package,
                 "coordination_payload": coordination_payload or {},
+                "run_config": dict(packet.run_config) if packet is not None else {},
             },
         }
         out = self.workflow.run(state)
@@ -89,10 +117,11 @@ class PreReviewAgent:
             "findings": out.get("findings", []),
             "score": float(out.get("score", 0.0)),
             "conclusion": out.get("conclusion", ""),
+            "retrieval_context": packet.retrieval_context if packet is not None else {},
             "memory_hits": memory_hits,
             "memory_context": memory_package.get("context_text", ""),
             "memory_package": memory_package,
-            "strategy": "multi_agent_plan_and_solve+reflection",
+            "strategy": str((packet.run_config or {}).get("strategy", "multi_agent_plan_and_solve+reflection")) if packet is not None else "multi_agent_plan_and_solve+reflection",
             "agent_roles": [r.get("name") for r in self.describe_roles()],
             "trace": trace,
         }

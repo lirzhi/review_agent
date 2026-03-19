@@ -1,89 +1,145 @@
+﻿import json
 import re
-import json
-from typing import Any, Dict, List, Optional, Callable
+from collections import Counter
+from typing import Any, Callable, Dict, List, Optional
 
-from agent.agent_backend.agents.knowledge_index_agent import KnowledgeIndexAgent
 from agent.agent_backend.context.builder import ContextBuilder
-from agent.agent_backend.llm.client import LLMClient
 from agent.agent_backend.memory.embedding import EmbeddingService
 from agent.agent_backend.memory.rag.document import DocumentProcessor
+from agent.agent_backend.memory.rag.schemas import RetrievalContext, RetrievalHit
 from agent.agent_backend.memory.storage.vector_store import VectorStore
 
 
 class RAGPipeline:
-    """
-    Hybrid RAG pipeline:
-    1) parse and index chunks
-    2) vector retrieve
-    3) lexical rerank
-    4) build compact context (GSSC)
-    """
+    """Parse -> semantic chunks -> enrich -> embed -> retrieve -> build context."""
 
     def __init__(self):
         self.processor = DocumentProcessor()
-        self.index_agent = KnowledgeIndexAgent()
-        self.llm = LLMClient()
         self.embedding = EmbeddingService()
         self.store = VectorStore()
         self.ctx_builder = ContextBuilder()
         self._indexed_docs: set[str] = set()
 
     @staticmethod
-    def _query_terms(query: str) -> list[str]:
+    def _query_terms(query: str) -> List[str]:
         query = (query or "").lower()
-        terms = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", query)
-        return [t for t in terms if t]
+        terms = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", query)
+        return [term for term in terms if term]
 
     @staticmethod
-    def _lexical_score(query_terms: list[str], text: str) -> float:
+    def _lexical_score(query_terms: List[str], text: str) -> float:
         if not query_terms:
             return 0.0
         low = (text or "").lower()
-        hit = sum(1 for t in query_terms if t in low)
+        hit = sum(1 for term in query_terms if term in low)
         return hit / len(query_terms)
 
     @staticmethod
     def _parse_chunk_order(chunk_id: str) -> int:
-        m = re.search(r"(\d+)$", str(chunk_id or ""))
-        return int(m.group(1)) if m else 10**9
+        match = re.search(r"(\d+)$", str(chunk_id or ""))
+        return int(match.group(1)) if match else 10**9
+
+    @staticmethod
+    def _split_text_hard(text: str, limit: int = 250) -> List[str]:
+        value = str(text or "").strip()
+        if not value:
+            return []
+        if len(value) <= limit:
+            return [value]
+        parts: List[str] = []
+        for idx in range(0, len(value), limit):
+            piece = value[idx : idx + limit].strip()
+            if piece:
+                parts.append(piece)
+        return parts
+
+    @staticmethod
+    def _extract_keywords(text: str, limit: int = 8) -> List[str]:
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_\-/]{2,}", str(text or ""))
+        stopwords = {
+            "should", "shall", "with", "from", "that", "this", "into", "using", "used",
+            "content", "document", "section", "chapter", "method", "result", "standard",
+        }
+        counter: Counter[str] = Counter()
+        for token in tokens:
+            clean = str(token).strip()
+            if not clean:
+                continue
+            if clean.lower() in stopwords:
+                continue
+            counter[clean] += 1
+        return [item for item, _ in counter.most_common(limit)]
+
+    @classmethod
+    def _build_chunk_summary(cls, text: str, limit: int = 120) -> str:
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return ""
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 3].rstrip() + "..."
+
+    @classmethod
+    def _build_document_summary(cls, title: str, full_text: str, max_segments: int = 4) -> str:
+        title_text = str(title or "").strip()
+        segments = []
+        for piece in re.split(r"\n{2,}|(?<=[\u3002\uff01\uff1f\uff1b.!?;])\s+", str(full_text or "")):
+            clean = " ".join(piece.split()).strip()
+            if clean:
+                segments.append(clean)
+            if len(segments) >= max_segments:
+                break
+        body = " ".join(segments).strip()
+        if title_text and body:
+            return cls._build_chunk_summary(f"{title_text} {body}", limit=400)
+        return cls._build_chunk_summary(title_text or body, limit=400)
+
+    @staticmethod
+    def _build_doc_summary_index_text(title: str, summary: str) -> str:
+        title_text = str(title or "").strip()
+        summary_text = str(summary or "").strip()
+        if title_text and summary_text:
+            return f"{title_text}\n\n{summary_text}"
+        return title_text or summary_text
 
     def _doc_related_chunks(self, doc_id: str, anchor_chunk_id: str = "", window: int = 2, limit: int = 6) -> List[Dict[str, Any]]:
         rows = self.store.list_by_doc(doc_id)
-        chunks = [r for r in rows if (r.get("metadata") or {}).get("item_type") == "chunk"]
+        chunks = [row for row in rows if (row.get("metadata") or {}).get("item_type") == "chunk"]
         if not chunks:
             return []
         anchor_order = self._parse_chunk_order(anchor_chunk_id) if anchor_chunk_id else None
         selected = chunks
         if anchor_order is not None and anchor_order < 10**9:
             selected = [
-                r
-                for r in chunks
-                if abs(int((r.get("metadata") or {}).get("chunk_order", 10**9)) - anchor_order) <= window
+                row
+                for row in chunks
+                if abs(int((row.get("metadata") or {}).get("chunk_order", 10**9)) - anchor_order) <= window
             ] or chunks
-        selected = selected[:limit]
-        out = []
-        for r in selected:
-            md = r.get("metadata") or {}
-            out.append(
+        output: List[Dict[str, Any]] = []
+        for row in selected[:limit]:
+            metadata = row.get("metadata") or {}
+            output.append(
                 {
-                    "chunk_id": md.get("chunk_id"),
-                    "chunk_order": md.get("chunk_order"),
-                    "page": md.get("page"),
-                    "summary": md.get("summary", ""),
-                    "text": str(r.get("text", ""))[:500],
+                    "chunk_id": metadata.get("chunk_id"),
+                    "chunk_order": metadata.get("chunk_order"),
+                    "page": metadata.get("page"),
+                    "page_start": metadata.get("page_start"),
+                    "page_end": metadata.get("page_end"),
+                    "summary": metadata.get("summary", ""),
+                    "text": str(row.get("text", ""))[:500],
                 }
             )
-        return out
+        return output
 
     def _doc_summary_meta(self, doc_id: str) -> Dict[str, Any]:
         rows = self.store.list_by_doc(doc_id)
-        for r in rows:
-            md = r.get("metadata") or {}
-            if md.get("item_type") == "doc_summary":
+        for row in rows:
+            metadata = row.get("metadata") or {}
+            if metadata.get("item_type") == "doc_summary":
                 return {
-                    "summary": md.get("summary", ""),
-                    "keywords": md.get("keywords", []),
-                    "text": r.get("text", ""),
+                    "summary": metadata.get("summary", ""),
+                    "keywords": metadata.get("keywords", []),
+                    "text": row.get("text", ""),
                 }
         return {"summary": "", "keywords": [], "text": ""}
 
@@ -97,124 +153,172 @@ class RAGPipeline:
         parsed_output_path: str = "",
         progress_callback: Optional[Callable[[float, str], None]] = None,
     ) -> int:
+        print(
+            f"[RAGDebug] index_file.input: doc_id={doc_id}, file_path={file_path}, "
+            f"file_type={file_type}, classification={classification}, force={force}"
+        )
         if (doc_id in self._indexed_docs) and not force:
             return 0
         if force:
             self.store.delete_by_doc(doc_id)
-        if progress_callback:
-            progress_callback(0.05, "开始读取并分块")
 
-        chunks = self.processor.process(file_path, file_type=file_type)
         if progress_callback:
-            progress_callback(0.2, f"分块完成，共 {len(chunks)} 块")
-        parsed_rows: list[dict] = []
-        chunk_enrich_rows: list[dict] = []
+            progress_callback(0.05, "start coarse parse and chunking")
+
+        parsed_doc = self.processor.parse_to_document(file_path=file_path, file_type=file_type, doc_id=doc_id)
+        full_text = parsed_doc.get_full_text()
+        if not full_text.strip():
+            raise ValueError(f"parse produced empty full text for doc_id={doc_id}, file_path={file_path}")
+        chunks: List[Dict[str, Any]] = []
+        fallback_chunks = self.processor.chunk_document(parsed_doc)
+        for chunk in fallback_chunks:
+            chunks.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "text": chunk.text,
+                    "summary": "",
+                    "keywords": [],
+                    "section_id": chunk.section_id,
+                    "section_path": list(chunk.section_path),
+                    "section_path_text": str(chunk.metadata.get("section_path_text", "") or ""),
+                    "section_name": chunk.metadata.get("section_name"),
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "unit_type": chunk.metadata.get("unit_type") or "semantic_chunk",
+                    "source_chunk_ids": chunk.metadata.get("source_chunk_ids", []),
+                    "char_count": chunk.metadata.get("char_count", len(chunk.text)),
+                }
+            )
+        print(f"[RAGDebug] index_file.parsed_document: title={parsed_doc.title!r}, units={len(parsed_doc.raw_units)}, full_text_chars={len(full_text)}, chunk_count={len(chunks)}")
+
+        if progress_callback:
+            progress_callback(0.2, f"coarse parse done, chunks={len(chunks)}")
+
+        parsed_rows: List[Dict[str, Any]] = []
         total = max(1, len(chunks))
-        for idx, c in enumerate(chunks, start=1):
-            text = c["text"]
-            enrich = self.index_agent.analyze_chunk(text)
-            summary = str(enrich.get("summary", "")).strip()
-            keywords = enrich.get("keywords", [])
+        for idx, chunk in enumerate(chunks, start=1):
+            text = str(chunk.get("text", "")).strip()
+            if not text:
+                continue
+            summary = str(chunk.get("summary", "")).strip()
+            keywords = chunk.get("keywords", [])
             if not isinstance(keywords, list):
                 keywords = []
-            keyword_text = " ".join([str(x).strip() for x in keywords if str(x).strip()])
-            vec = self.embedding.embed(text)
-            chunk_key = f"{doc_id}:{c['chunk_id']}"
+            if not summary:
+                summary = self._build_chunk_summary(text)
+            if not keywords:
+                keywords = self._extract_keywords(text)
+
+            keyword_text = " ".join([str(item).strip() for item in keywords if str(item).strip()])
+            section_path = list(chunk.get("section_path") or [])
+            section_path_text = str(chunk.get("section_path_text", "") or "").strip()
+            if not section_path_text and section_path:
+                section_path_text = " > ".join([str(item).strip() for item in section_path if str(item).strip()])
+            vector = self.embedding.embed(text)
+            item_key = f"{doc_id}:{chunk['chunk_id']}"
             metadata = {
                 "doc_id": doc_id,
-                "chunk_id": c["chunk_id"],
+                "doc_title": parsed_doc.title,
+                "doc_type": parsed_doc.doc_type,
+                "chunk_id": chunk["chunk_id"],
                 "item_type": "chunk",
-                "chunk_order": self._parse_chunk_order(c["chunk_id"]),
-                "page": c.get("page"),
-                "page_start": c.get("page_start"),
-                "page_end": c.get("page_end"),
-                "section_id": c.get("section_id"),
-                "section_code": c.get("section_code"),
-                "section_name": c.get("section_name"),
-                "unit_type": c.get("unit_type"),
-                "char_count": c.get("char_count", len(text)),
-                "source_chunk_ids": c.get("source_chunk_ids", []),
+                "chunk_order": self._parse_chunk_order(chunk["chunk_id"]),
+                "page": chunk.get("page_start"),
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "section_id": chunk.get("section_id"),
+                "section_path": section_path,
+                "section_path_text": section_path_text,
+                "section_name": chunk.get("section_name"),
+                "unit_type": chunk.get("unit_type"),
+                "char_count": chunk.get("char_count", len(text)),
+                "source_chunk_ids": chunk.get("source_chunk_ids", []),
                 "classification": classification,
                 "summary": summary,
                 "keywords": keywords,
                 "keyword_text": keyword_text,
             }
-            self.store.add(chunk_key, vec, text, metadata=metadata)
-            chunk_enrich_rows.append(
+            self.store.add(item_key, vector, text, metadata=metadata)
+
+            row = {
+                "chunk_id": chunk["chunk_id"],
+                "text": text,
+                "chunk_type": "semantic",
+                "section_id": chunk.get("section_id"),
+                "section_path": section_path,
+                "section_path_text": section_path_text,
+                "page": chunk.get("page_start"),
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "token_count": 0,
+            }
+            row.update(
                 {
-                    "chunk_id": c.get("chunk_id"),
-                    "summary": summary,
-                    "keywords": keywords,
-                    "text": text[:400],
-                }
-            )
-            parsed_rows.append(
-                {
-                    "chunk_id": c.get("chunk_id"),
-                    "page": c.get("page"),
-                    "page_start": c.get("page_start"),
-                    "page_end": c.get("page_end"),
-                    "section_id": c.get("section_id"),
-                    "section_code": c.get("section_code"),
-                    "section_name": c.get("section_name"),
-                    "unit_type": c.get("unit_type"),
-                    "char_count": c.get("char_count", len(text)),
-                    "source_chunk_ids": c.get("source_chunk_ids", []),
                     "classification": classification,
                     "summary": summary,
                     "keywords": keywords,
-                    "text": text,
+                    "doc_id": doc_id,
+                    "doc_title": parsed_doc.title,
+                    "doc_type": parsed_doc.doc_type,
                 }
             )
+            parsed_rows.append(row)
             if progress_callback:
-                progress_callback(0.2 + (0.7 * idx / total), f"已处理分块 {idx}/{total}")
+                progress_callback(0.2 + (0.7 * idx / total), f"enrich chunk {idx}/{total}")
 
         if progress_callback:
-            progress_callback(0.92, "生成整文摘要")
-        doc_enrich = self.index_agent.analyze_document(
-            title=str(doc_id),
-            chunks=chunk_enrich_rows,
-        )
-        doc_summary_text = str(doc_enrich.get("summary", "")).strip()
-        doc_keywords = doc_enrich.get("keywords", [])
-        if not isinstance(doc_keywords, list):
-            doc_keywords = []
+            progress_callback(0.92, "build document summary")
+        doc_summary_text = self._build_document_summary(parsed_doc.title, full_text)
+        doc_keywords = self._extract_keywords(full_text)
+        if not chunks and not doc_summary_text:
+            raise ValueError(f"no chunks and no document summary generated for doc_id={doc_id}")
         if doc_summary_text:
-            doc_vec = self.embedding.embed(doc_summary_text)
+            doc_summary_index_text = self._build_doc_summary_index_text(parsed_doc.title, doc_summary_text)
+            doc_vector = self.embedding.embed(doc_summary_index_text)
             self.store.add(
                 f"{doc_id}:__doc_summary__",
-                doc_vec,
-                doc_summary_text,
+                doc_vector,
+                doc_summary_index_text,
                 metadata={
                     "doc_id": doc_id,
+                    "doc_title": parsed_doc.title,
+                    "doc_type": parsed_doc.doc_type,
                     "chunk_id": "__doc_summary__",
                     "item_type": "doc_summary",
                     "chunk_order": 0,
                     "classification": classification,
                     "summary": doc_summary_text,
                     "keywords": doc_keywords,
-                    "keyword_text": " ".join([str(x).strip() for x in doc_keywords if str(x).strip()]),
+                    "keyword_text": " ".join([str(item).strip() for item in doc_keywords if str(item).strip()]),
                 },
             )
-        parsed_rows.insert(
-            0,
+
+        artifact_rows = [
             {
                 "chunk_id": "__doc_summary__",
                 "item_type": "doc_summary",
+                "doc_id": doc_id,
+                "doc_title": parsed_doc.title,
+                "doc_type": parsed_doc.doc_type,
                 "summary": doc_summary_text,
                 "keywords": doc_keywords,
-                "text": doc_summary_text,
-            },
-        )
+                "text": self._build_doc_summary_index_text(parsed_doc.title, doc_summary_text),
+            }
+        ]
+        artifact_rows.extend(parsed_rows)
 
         if parsed_output_path:
             if progress_callback:
-                progress_callback(0.97, "写入解析结果")
-            with open(parsed_output_path, "w", encoding="utf-8") as f:
-                json.dump(parsed_rows, f, ensure_ascii=False, indent=2)
+                progress_callback(0.97, "write parsed artifact")
+            with open(parsed_output_path, "w", encoding="utf-8") as fp:
+                json.dump(artifact_rows, fp, ensure_ascii=False, indent=2)
         self._indexed_docs.add(doc_id)
+        print(
+            f"[RAGDebug] index_file.output: doc_id={doc_id}, stored_chunk_count={len(chunks)}, "
+            f"artifact_rows={len(artifact_rows)}, parsed_output_path={parsed_output_path}"
+        )
         if progress_callback:
-            progress_callback(1.0, "解析完成")
+            progress_callback(1.0, "knowledge indexing completed")
         return len(chunks)
 
     def index_preparsed(
@@ -224,9 +328,10 @@ class RAGPipeline:
         classification: str = "",
         force: bool = False,
     ) -> int:
-        """
-        Rebuild vector index from saved parsed JSON rows without re-parsing source file.
-        """
+        print(
+            f"[RAGDebug] index_preparsed.input: doc_id={doc_id}, row_count={len(parsed_rows or [])}, "
+            f"classification={classification}, force={force}"
+        )
         if (doc_id in self._indexed_docs) and not force:
             return 0
         if force:
@@ -239,31 +344,36 @@ class RAGPipeline:
             chunk_id = str(row.get("chunk_id", "")).strip()
             if not chunk_id:
                 continue
-
             item_type = str(row.get("item_type", "chunk") or "chunk")
             text = str(row.get("text", "")).strip()
             if not text:
                 continue
+
+            doc_title = str(row.get("doc_title", doc_id) or doc_id)
+            doc_type = str(row.get("doc_type", "unknown") or "unknown")
 
             if item_type == "doc_summary":
                 summary = str(row.get("summary", "") or text).strip()
                 keywords = row.get("keywords", [])
                 if not isinstance(keywords, list):
                     keywords = []
-                vec = self.embedding.embed(summary)
+                summary_index_text = self._build_doc_summary_index_text(doc_title, summary)
+                vector = self.embedding.embed(summary_index_text)
                 self.store.add(
                     f"{doc_id}:__doc_summary__",
-                    vec,
-                    summary,
+                    vector,
+                    summary_index_text,
                     metadata={
                         "doc_id": doc_id,
+                        "doc_title": doc_title,
+                        "doc_type": doc_type,
                         "chunk_id": "__doc_summary__",
                         "item_type": "doc_summary",
                         "chunk_order": 0,
                         "classification": classification,
                         "summary": summary,
                         "keywords": keywords,
-                        "keyword_text": " ".join([str(x).strip() for x in keywords if str(x).strip()]),
+                        "keyword_text": " ".join([str(item).strip() for item in keywords if str(item).strip()]),
                     },
                 )
                 count += 1
@@ -273,13 +383,15 @@ class RAGPipeline:
             keywords = row.get("keywords", [])
             if not isinstance(keywords, list):
                 keywords = []
-            vec = self.embedding.embed(text)
+            vector = self.embedding.embed(text)
             self.store.add(
                 f"{doc_id}:{chunk_id}",
-                vec,
+                vector,
                 text,
                 metadata={
                     "doc_id": doc_id,
+                    "doc_title": doc_title,
+                    "doc_type": doc_type,
                     "chunk_id": chunk_id,
                     "item_type": "chunk",
                     "chunk_order": self._parse_chunk_order(chunk_id),
@@ -287,7 +399,7 @@ class RAGPipeline:
                     "page_start": row.get("page_start", row.get("page")),
                     "page_end": row.get("page_end", row.get("page")),
                     "section_id": row.get("section_id"),
-                    "section_code": row.get("section_code"),
+                    "section_path": list(row.get("section_path") or []),
                     "section_name": row.get("section_name"),
                     "unit_type": row.get("unit_type"),
                     "char_count": row.get("char_count", len(text)),
@@ -295,125 +407,243 @@ class RAGPipeline:
                     "classification": classification,
                     "summary": summary,
                     "keywords": keywords,
-                    "keyword_text": " ".join([str(x).strip() for x in keywords if str(x).strip()]),
+                    "keyword_text": " ".join([str(item).strip() for item in keywords if str(item).strip()]),
                 },
             )
             count += 1
 
         if count > 0:
             self._indexed_docs.add(doc_id)
+        print(f"[RAGDebug] index_preparsed.output: doc_id={doc_id}, indexed_rows={count}")
         return count
 
     def retrieve(
         self,
         query: str,
         top_k: int = 5,
-        alpha: float = 0.75,
-        min_score: float = 0.6,
+        alpha: float = 0.7,
+        min_score: float = 0.0,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        qv = self.embedding.embed(query)
-        vec_hits = self.store.search(qv, top_k=max(top_k * 4, 20), filters=filters or {})
+        print(f"[RAGDebug] retrieve.input: query={query!r}, top_k={top_k}, alpha={alpha}, min_score={min_score}, filters={filters}")
+        query_vector = self.embedding.embed(query)
+        vector_hits = self.store.search(query_vector, top_k=max(top_k * 4, 20), filters=filters or {})
+        keyword_hits = self.store.keyword_search(query=query, top_k=max(top_k * 4, 20), filters=filters or {})
         terms = self._query_terms(query)
+        vector_map = {str(hit.get("id", "")): hit for hit in vector_hits if str(hit.get("id", ""))}
+        keyword_map = {str(hit.get("id", "")): hit for hit in keyword_hits if str(hit.get("id", ""))}
+        merged_ids: List[str] = []
+        for item in vector_hits + keyword_hits:
+            hit_id = str(item.get("id", ""))
+            if hit_id and hit_id not in merged_ids:
+                merged_ids.append(hit_id)
 
-        reranked = []
-        texts_for_rerank = [str(h.get("text", "")) for h in vec_hits]
-        rerank_scores = self.llm.rerank(query=query, documents=texts_for_rerank) if vec_hits else []
-        for h in vec_hits:
-            metadata = (h.get("metadata") or {})
-            text_lex = self._lexical_score(terms, h.get("text", ""))
+        typed_hits: List[RetrievalHit] = []
+        for hit_id in merged_ids:
+            hit = vector_map.get(hit_id) or keyword_map.get(hit_id) or {}
+            metadata = hit.get("metadata") or {}
+            text_value = str(hit.get("text", ""))
+            text_lex = self._lexical_score(terms, text_value)
             summary_lex = self._lexical_score(terms, str(metadata.get("summary", "")))
             keyword_lex = self._lexical_score(terms, str(metadata.get("keyword_text", "")))
             lexical = min(1.0, 0.55 * text_lex + 0.20 * summary_lex + 0.25 * keyword_lex)
-            vec_score = float(h.get("score", 0.0))
-            idx = len(reranked)
-            model_rerank = float(rerank_scores[idx]) if idx < len(rerank_scores) else lexical
-            final_score = alpha * vec_score + (1 - alpha) * model_rerank
-            reranked.append(
+            vector_score = float((vector_map.get(hit_id) or {}).get("score", 0.0))
+            keyword_score = float((keyword_map.get(hit_id) or {}).get("score", 0.0))
+            final_score = alpha * vector_score + (1 - alpha) * max(keyword_score, lexical)
+            page_start = metadata.get("page_start")
+            page_end = metadata.get("page_end")
+            page_span = ""
+            if page_start is not None and page_end is not None:
+                page_span = f"{page_start}-{page_end}" if page_start != page_end else str(page_start)
+            elif page_start is not None:
+                page_span = str(page_start)
+
+            typed_hits.append(
+                RetrievalHit(
+                    chunk_id=str(metadata.get("chunk_id", "")),
+                    doc_id=str(metadata.get("doc_id", "")),
+                    doc_title=str(metadata.get("doc_title", metadata.get("doc_id", ""))),
+                    doc_type=str(metadata.get("doc_type", "unknown")),
+                    text=text_value,
+                    section_path=list(metadata.get("section_path") or []),
+                    page_span=page_span or None,
+                    vector_score=vector_score,
+                    lexical_score=max(keyword_score, lexical),
+                    rerank_score=0.0,
+                    final_score=final_score,
+                    metadata={
+                        "id": hit_id,
+                        "item_type": metadata.get("item_type", "chunk"),
+                        "chunk_order": metadata.get("chunk_order"),
+                        "page": metadata.get("page"),
+                        "page_start": page_start,
+                        "page_end": page_end,
+                        "section_id": metadata.get("section_id"),
+                        "section_name": metadata.get("section_name"),
+                        "unit_type": metadata.get("unit_type"),
+                        "char_count": metadata.get("char_count"),
+                        "classification": metadata.get("classification"),
+                        "summary": metadata.get("summary"),
+                        "keywords": metadata.get("keywords") or [],
+                        "match_routes": [
+                            route
+                            for route, present in (("vector", hit_id in vector_map), ("keyword", hit_id in keyword_map))
+                            if present
+                        ],
+                    },
+                )
+            )
+
+        typed_hits.sort(key=lambda item: item.final_score, reverse=True)
+        filtered = typed_hits
+        top_hits = filtered[:top_k]
+
+        output: List[Dict[str, Any]] = []
+        for hit in top_hits:
+            doc_meta = self._doc_summary_meta(hit.doc_id) if hit.doc_id else {"summary": "", "keywords": []}
+            anchor_chunk = "" if hit.metadata.get("item_type") == "doc_summary" else hit.chunk_id
+            output.append(
                 {
-                    "id": h["id"],
-                    "doc_id": metadata.get("doc_id"),
-                    "chunk_id": metadata.get("chunk_id"),
-                    "item_type": metadata.get("item_type", "chunk"),
-                    "chunk_order": metadata.get("chunk_order"),
-                    "page": metadata.get("page"),
-                    "page_start": metadata.get("page_start"),
-                    "page_end": metadata.get("page_end"),
-                    "section_id": metadata.get("section_id"),
-                    "section_code": metadata.get("section_code"),
-                    "section_name": metadata.get("section_name"),
-                    "unit_type": metadata.get("unit_type"),
-                    "char_count": metadata.get("char_count"),
-                    "classification": metadata.get("classification"),
-                    "summary": metadata.get("summary"),
-                    "keywords": metadata.get("keywords") or [],
-                    "vector_score": vec_score,
-                    "lexical_score": lexical,
-                    "rerank_score": model_rerank,
-                    "score": final_score,
-                    "text": h.get("text", ""),
+                    "id": hit.metadata.get("id"),
+                    "doc_id": hit.doc_id,
+                    "doc_title": hit.doc_title,
+                    "doc_type": hit.doc_type,
+                    "chunk_id": hit.chunk_id,
+                    "item_type": hit.metadata.get("item_type", "chunk"),
+                    "chunk_order": hit.metadata.get("chunk_order"),
+                    "page": hit.metadata.get("page"),
+                    "page_start": hit.metadata.get("page_start"),
+                    "page_end": hit.metadata.get("page_end"),
+                    "section_id": hit.metadata.get("section_id"),
+                    "section_code": None,
+                    "section_name": hit.metadata.get("section_name"),
+                    "section_path": hit.section_path,
+                    "unit_type": hit.metadata.get("unit_type"),
+                    "char_count": hit.metadata.get("char_count"),
+                    "classification": hit.metadata.get("classification"),
+                    "summary": hit.metadata.get("summary"),
+                    "keywords": hit.metadata.get("keywords") or [],
+                    "vector_score": hit.vector_score,
+                    "lexical_score": hit.lexical_score,
+                    "rerank_score": 0.0,
+                    "score": hit.final_score,
+                    "match_routes": hit.metadata.get("match_routes") or [],
+                    "text": hit.text,
+                    "doc_summary": doc_meta.get("summary", ""),
+                    "doc_keywords": doc_meta.get("keywords", []),
+                    "related_chunks": self._doc_related_chunks(doc_id=hit.doc_id, anchor_chunk_id=anchor_chunk),
                 }
             )
-        reranked.sort(key=lambda x: x["score"], reverse=True)
-        filtered = [x for x in reranked if float(x.get("score", 0.0)) >= float(min_score)]
-        top_hits = filtered[:top_k]
-        for h in top_hits:
-            doc_id = str(h.get("doc_id", "") or "")
-            if not doc_id:
-                h["related_chunks"] = []
-                h["doc_summary"] = ""
-                h["doc_keywords"] = []
-                continue
-            doc_meta = self._doc_summary_meta(doc_id)
-            h["doc_summary"] = doc_meta.get("summary", "")
-            h["doc_keywords"] = doc_meta.get("keywords", [])
-            anchor = "" if h.get("item_type") == "doc_summary" else str(h.get("chunk_id", "") or "")
-            h["related_chunks"] = self._doc_related_chunks(doc_id=doc_id, anchor_chunk_id=anchor)
-        return top_hits
+        print(
+            f"[RAGDebug] retrieve.output: vector_hits={len(vector_hits)}, keyword_hits={len(keyword_hits)}, filtered_hits={len(filtered)}, "
+            f"returned_hits={len(output)}, top_doc_ids={[row.get('doc_id') for row in output[:5]]}"
+        )
+        return output
 
     def build_context(
         self,
         query: str,
         top_k: int = 6,
         alpha: float = 0.75,
-        min_score: float = 0.6,
+        min_score: float = 0.0,
         max_chars: int = 1600,
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        hits = self.retrieve(
-            query=query,
-            top_k=top_k,
-            alpha=alpha,
-            min_score=min_score,
-            filters=filters,
-        )
+        print(f"[RAGDebug] build_context.input: query={query!r}, top_k={top_k}, min_score={min_score}, max_chars={max_chars}, filters={filters}")
+        hits = self.retrieve(query=query, top_k=top_k, alpha=alpha, min_score=min_score, filters=filters)
         sources = [
             {
-                "text": h["text"],
-                "score": h["score"],
-                "source": f"{h.get('doc_id')}/{h.get('chunk_id')}",
+                "text": hit["text"],
+                "score": hit["score"],
+                "source": f"{hit.get('doc_id')}/{hit.get('chunk_id')}",
                 "metadata": {
-                    "doc_id": h.get("doc_id"),
-                    "chunk_id": h.get("chunk_id"),
-                    "page_start": h.get("page_start"),
-                    "page_end": h.get("page_end"),
+                    "doc_id": hit.get("doc_id"),
+                    "doc_title": hit.get("doc_title"),
+                    "chunk_id": hit.get("chunk_id"),
+                    "page_start": hit.get("page_start"),
+                    "page_end": hit.get("page_end"),
+                    "section_path": hit.get("section_path") or [],
                 },
             }
-            for h in hits
+            for hit in hits
         ]
         gssc = self.ctx_builder.build(sources=sources, max_items=top_k)
         compressed = gssc.compressed[:max_chars]
-        return {
-            "query": query,
-            "hits": hits,
-            "context": compressed,
-            "references": [
-                {
-                    "doc_id": h["doc_id"],
-                    "chunk_id": h["chunk_id"],
-                    "page": h["page"],
-                    "score": h["score"],
+
+        grouped_docs: Dict[str, Dict[str, Any]] = {}
+        for hit in hits:
+            doc_id = str(hit.get("doc_id", "") or "")
+            if not doc_id:
+                continue
+            if doc_id not in grouped_docs:
+                grouped_docs[doc_id] = {
+                    "doc_id": doc_id,
+                    "doc_title": hit.get("doc_title", ""),
+                    "doc_type": hit.get("doc_type", ""),
+                    "doc_summary": hit.get("doc_summary", ""),
+                    "doc_keywords": hit.get("doc_keywords", []),
+                    "matched_hits": [],
+                    "related_chunks": hit.get("related_chunks", []),
                 }
-                for h in hits
+            grouped_docs[doc_id]["matched_hits"].append(
+                {
+                    "chunk_id": hit.get("chunk_id"),
+                    "item_type": hit.get("item_type", "chunk"),
+                    "score": hit.get("score"),
+                    "summary": hit.get("summary", ""),
+                    "page_start": hit.get("page_start"),
+                    "page_end": hit.get("page_end"),
+                    "section_name": hit.get("section_name"),
+                }
+            )
+
+        typed_context = RetrievalContext(
+            query=query,
+            rewritten_queries=[query],
+            hits=[
+                RetrievalHit(
+                    chunk_id=str(hit.get("chunk_id", "")),
+                    doc_id=str(hit.get("doc_id", "")),
+                    doc_title=str(hit.get("doc_title", "")),
+                    doc_type=str(hit.get("doc_type", "")),
+                    text=str(hit.get("text", "")),
+                    section_path=list(hit.get("section_path") or []),
+                    page_span=(
+                        f"{hit.get('page_start')}-{hit.get('page_end')}"
+                        if hit.get("page_start") is not None and hit.get("page_end") is not None and hit.get("page_start") != hit.get("page_end")
+                        else str(hit.get("page_start"))
+                        if hit.get("page_start") is not None
+                        else None
+                    ),
+                    vector_score=float(hit.get("vector_score", 0.0)),
+                    lexical_score=float(hit.get("lexical_score", 0.0)),
+                    rerank_score=float(hit.get("rerank_score", 0.0)),
+                    final_score=float(hit.get("score", 0.0)),
+                    metadata={
+                        "classification": hit.get("classification"),
+                        "summary": hit.get("summary"),
+                        "keywords": hit.get("keywords") or [],
+                    },
+                )
+                for hit in hits
             ],
-        }
+            references=[
+                {
+                    "doc_id": hit.get("doc_id"),
+                    "doc_title": hit.get("doc_title"),
+                    "chunk_id": hit.get("chunk_id"),
+                    "page_start": hit.get("page_start"),
+                    "page_end": hit.get("page_end"),
+                    "score": hit.get("score"),
+                }
+                for hit in hits
+            ],
+            evidence_blocks=sources,
+            grouped_docs=list(grouped_docs.values()),
+            used_tokens=len(compressed),
+            metadata={"filters": filters or {}, "top_k": top_k},
+        )
+        result = typed_context.to_dict()
+        result["context"] = compressed
+        print(f"[RAGDebug] build_context.output: hit_count={len(hits)}, grouped_docs={len(grouped_docs)}, context_chars={len(compressed)}")
+        return result
